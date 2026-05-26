@@ -394,6 +394,7 @@ async def _upload_local_file_for_provider(
 async def _resolve_file_refs_in_params(
     ctx: AppContext,
     *,
+    trigger: TriggerContext,
     provider: str,
     comfyui: ComfyUIClient,
     runninghub: RunningHubClient | None,
@@ -405,7 +406,19 @@ async def _resolve_file_refs_in_params(
 
     def is_file_ref(s: str) -> bool:
         v = str(s or "").strip()
+        if v.startswith("@msg:") or v.startswith("@msgid:"):
+            return False
         return v.startswith("@") or (":@" in v and v.split(":@", 1)[0] in ("file", "image", "video", "audio"))
+
+    def is_msg_ref(s: str) -> bool:
+        v = str(s or "").strip().lower()
+        return v.startswith("@msg:") or v.startswith("@msgid:")
+
+    def parse_msg_ref(s: str) -> tuple[str, str]:
+        v = str(s or "").strip()
+        v0 = v[1:] if v.startswith("@") else v
+        head, tail = (v0.split(":", 1) + [""])[:2]
+        return head.strip().lower(), tail.strip()
 
     def strip_file_ref(s: str) -> str:
         v = str(s or "").strip()
@@ -422,21 +435,58 @@ async def _resolve_file_refs_in_params(
         if not isinstance(v, str):
             continue
         s0 = v.strip()
-        if not is_file_ref(s0):
+        if not is_file_ref(s0) and not is_msg_ref(s0):
             continue
 
         if is_inline_node_key(str(k)):
             if "," in s0:
                 raise RuntimeError(f"inline node param does not support multiple files: {k}={v}")
-            p = strip_file_ref(s0)
-            out[k] = await _upload_local_file_for_provider(
-                provider=provider,
-                comfyui=comfyui,
-                runninghub=runninghub,
-                file_path=p,
-                overwrite=ctx.settings.comfyui_upload_overwrite,
-                subfolder=ctx.settings.comfyui_upload_subfolder,
-            )
+            if is_msg_ref(s0):
+                kind, sel = parse_msg_ref(s0)
+                if kind != "msg":
+                    raise RuntimeError(f"unsupported msg ref: {v}")
+                info = ctx.runner.get_im_attachment(chat_id=trigger.chat_id, user_open_id=trigger.user_open_id, selector=sel or "last")
+                if not info:
+                    raise RuntimeError("no recent attachment found for @msg:last (please send an image/file first, then run the command)")
+                if not ctx.im:
+                    raise RuntimeError("missing im client")
+                akey = str(info.get("key") or "").strip()
+                akind = str(info.get("kind") or "").strip().lower()
+                fname = str(info.get("file_name") or "").strip()
+                ext = Path(fname).suffix if fname else (".png" if akind == "image" else ".bin")
+                base_dir = str(ctx.settings.bitable_download_dir or "").strip() or os.getcwd()
+                tmp_dir = os.path.join(base_dir, "_im_attachments")
+                os.makedirs(tmp_dir, exist_ok=True)
+                tmp_path = os.path.join(tmp_dir, f"im_{akey[:12]}{ext}")
+                if akind == "image":
+                    await ctx.im.download_image(image_key=akey, save_path=tmp_path)
+                else:
+                    await ctx.im.download_file(file_key=akey, save_path=tmp_path)
+                try:
+                    out[k] = await _upload_local_file_for_provider(
+                        provider=provider,
+                        comfyui=comfyui,
+                        runninghub=runninghub,
+                        file_path=tmp_path,
+                        overwrite=ctx.settings.comfyui_upload_overwrite,
+                        subfolder=ctx.settings.comfyui_upload_subfolder,
+                    )
+                finally:
+                    try:
+                        if os.path.exists(tmp_path) and os.path.isfile(tmp_path) and os.path.abspath(tmp_dir) in os.path.abspath(tmp_path):
+                            os.remove(tmp_path)
+                    except Exception:
+                        pass
+            else:
+                p = strip_file_ref(s0)
+                out[k] = await _upload_local_file_for_provider(
+                    provider=provider,
+                    comfyui=comfyui,
+                    runninghub=runninghub,
+                    file_path=p,
+                    overwrite=ctx.settings.comfyui_upload_overwrite,
+                    subfolder=ctx.settings.comfyui_upload_subfolder,
+                )
             continue
 
         parts = [x.strip() for x in s0.split(",")] if "," in s0 else [s0]
@@ -445,7 +495,46 @@ async def _resolve_file_refs_in_params(
         for it in parts:
             if not it:
                 continue
-            if is_file_ref(it):
+            if is_msg_ref(it):
+                kind, sel = parse_msg_ref(it)
+                if kind != "msg":
+                    raise RuntimeError(f"unsupported msg ref: {it}")
+                info = ctx.runner.get_im_attachment(chat_id=trigger.chat_id, user_open_id=trigger.user_open_id, selector=sel or "last")
+                if not info:
+                    raise RuntimeError("no recent attachment found for @msg:last (please send an image/file first, then run the command)")
+                if not ctx.im:
+                    raise RuntimeError("missing im client")
+                akey = str(info.get("key") or "").strip()
+                akind = str(info.get("kind") or "").strip().lower()
+                fname = str(info.get("file_name") or "").strip()
+                ext = Path(fname).suffix if fname else (".png" if akind == "image" else ".bin")
+                base_dir = str(ctx.settings.bitable_download_dir or "").strip() or os.getcwd()
+                tmp_dir = os.path.join(base_dir, "_im_attachments")
+                os.makedirs(tmp_dir, exist_ok=True)
+                tmp_path = os.path.join(tmp_dir, f"im_{akey[:12]}{ext}")
+                if akind == "image":
+                    await ctx.im.download_image(image_key=akey, save_path=tmp_path)
+                else:
+                    await ctx.im.download_file(file_key=akey, save_path=tmp_path)
+                try:
+                    resolved_list.append(
+                        await _upload_local_file_for_provider(
+                            provider=provider,
+                            comfyui=comfyui,
+                            runninghub=runninghub,
+                            file_path=tmp_path,
+                            overwrite=ctx.settings.comfyui_upload_overwrite,
+                            subfolder=ctx.settings.comfyui_upload_subfolder,
+                        )
+                    )
+                finally:
+                    try:
+                        if os.path.exists(tmp_path) and os.path.isfile(tmp_path) and os.path.abspath(tmp_dir) in os.path.abspath(tmp_path):
+                            os.remove(tmp_path)
+                    except Exception:
+                        pass
+                changed = True
+            elif is_file_ref(it):
                 p = strip_file_ref(it)
                 resolved_list.append(
                     await _upload_local_file_for_provider(
@@ -818,6 +907,7 @@ async def run_workflow(
 
     params = await _resolve_file_refs_in_params(
         ctx,
+        trigger=trigger,
         provider=provider,
         comfyui=comfyui_client,
         runninghub=runninghub_client,

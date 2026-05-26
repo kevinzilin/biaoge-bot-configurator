@@ -310,6 +310,22 @@ def do_p2_im_message_receive_v1_factory(ctx: AppContext):
     def handler(data: P2ImMessageReceiveV1) -> None:
         msg = data.event.message
         content = _parse_message_content_json(msg.content)
+        chat_id = getattr(msg, "chat_id", None)
+        msg_id = getattr(msg, "message_id", None)
+        sender = getattr(data.event, "sender", None)
+        sender_id = getattr(sender, "sender_id", None) if sender else None
+        user_open_id = getattr(sender_id, "open_id", None) if sender_id else None
+
+        try:
+            img_key = content.get("image_key") or content.get("imageKey")
+            if isinstance(img_key, str) and img_key.strip():
+                ctx.runner.register_im_attachment(chat_id=chat_id, user_open_id=user_open_id, kind="image", key=img_key.strip(), message_id=msg_id)
+            file_key = content.get("file_key") or content.get("fileKey")
+            if isinstance(file_key, str) and file_key.strip():
+                ctx.runner.register_im_attachment(chat_id=chat_id, user_open_id=user_open_id, kind="file", key=file_key.strip(), message_id=msg_id)
+        except Exception:
+            pass
+
         text = str(content.get("text") or "")
         if not text:
             text = _extract_text_from_message_content(msg.content)
@@ -318,10 +334,6 @@ def do_p2_im_message_receive_v1_factory(ctx: AppContext):
         cmd = parse_message_text(text)
         if not cmd:
             return
-        chat_id = getattr(msg, "chat_id", None)
-        sender = getattr(data.event, "sender", None)
-        sender_id = getattr(sender, "sender_id", None) if sender else None
-        user_open_id = getattr(sender_id, "open_id", None) if sender_id else None
         trig = TriggerContext(chat_id=chat_id, user_open_id=user_open_id, source="im.message.receive_v1")
         threading.Thread(target=dispatch_in_thread, kwargs={"ctx": ctx, "name": cmd.name, "args": cmd.args, "trigger": trig}, daemon=True).start()
 

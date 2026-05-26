@@ -143,3 +143,37 @@ class IMClient:
             data = r.json()
             if data.get("code") not in (0, None):
                 raise RuntimeError(f"send_file failed: {data}")
+
+    async def download_image(self, *, image_key: str, save_path: str) -> None:
+        token = await self._auth.tenant_token()
+        key = str(image_key or "").strip()
+        if not key:
+            raise RuntimeError("missing image_key")
+        url = f"https://open.feishu.cn/open-apis/im/v1/images/{key}"
+        p = Path(save_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+            r = await client.get(url, headers={"Authorization": f"Bearer {token}"}, params={"type": "origin"})
+            r.raise_for_status()
+            ct = str(r.headers.get("content-type") or "").lower()
+            if "application/json" in ct:
+                data = r.json()
+                raise RuntimeError(f"download_image failed: {data}")
+            p.write_bytes(r.content)
+
+    async def download_file(self, *, file_key: str, save_path: str) -> None:
+        token = await self._auth.tenant_token()
+        key = str(file_key or "").strip()
+        if not key:
+            raise RuntimeError("missing file_key")
+        url = f"https://open.feishu.cn/open-apis/im/v1/files/{key}"
+        p = Path(save_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
+            r = await client.get(url, headers={"Authorization": f"Bearer {token}"})
+            r.raise_for_status()
+            ct = str(r.headers.get("content-type") or "").lower()
+            if "application/json" in ct:
+                data = r.json()
+                raise RuntimeError(f"download_file failed: {data}")
+            p.write_bytes(r.content)

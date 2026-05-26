@@ -34,9 +34,56 @@ class QueueRunner:
         self._prompt_ctx: dict[str, dict[str, Any]] = {}
         self._pending_remote: dict[str, dict[str, Any]] = {}
         self._poller_started = False
+        self._im_attach_lock = threading.Lock()
+        self._im_attachments: dict[tuple[str, str], list[dict[str, Any]]] = {}
 
     def set_context(self, ctx: Any) -> None:
         self._ctx = ctx
+
+    def register_im_attachment(
+        self,
+        *,
+        chat_id: str | None,
+        user_open_id: str | None,
+        kind: str,
+        key: str,
+        file_name: str | None = None,
+        message_id: str | None = None,
+    ) -> None:
+        cid = str(chat_id or "").strip()
+        uid = str(user_open_id or "").strip()
+        k0 = str(kind or "").strip().lower()
+        key0 = str(key or "").strip()
+        if not cid or not uid or not key0:
+            return
+        item: dict[str, Any] = {"kind": k0, "key": key0, "file_name": str(file_name or "").strip() or None, "message_id": str(message_id or "").strip() or None, "ts": time.time()}
+        with self._im_attach_lock:
+            lst = list(self._im_attachments.get((cid, uid), []))
+            lst.append(item)
+            lst = [x for x in lst if isinstance(x, dict)]
+            lst = lst[-10:]
+            self._im_attachments[(cid, uid)] = lst
+
+    def get_im_attachment(self, *, chat_id: str | None, user_open_id: str | None, selector: str) -> dict[str, Any] | None:
+        cid = str(chat_id or "").strip()
+        uid = str(user_open_id or "").strip()
+        if not cid or not uid:
+            return None
+        sel = str(selector or "").strip().lower()
+        nth = 1
+        if sel.startswith("last:"):
+            try:
+                nth = int(sel.split(":", 1)[1])
+            except Exception:
+                nth = 1
+        nth = max(1, nth)
+        with self._im_attach_lock:
+            lst = list(self._im_attachments.get((cid, uid), []))
+        if not lst:
+            return None
+        if nth > len(lst):
+            return None
+        return lst[-nth]
 
     def start_remote_poller(self) -> None:
         if self._poller_started:
