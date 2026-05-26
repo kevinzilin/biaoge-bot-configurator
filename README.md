@@ -51,13 +51,28 @@ python -m biaoge_bot.main
 
 ## 指令
 
-- `/help`
-- `/panel`
-- `/run_default`
-- `/run ...`
-- `/wf <workflowKey> ...`
-- `/ids`：获取 chat_id / user_open_id
-- `/botid`：获取 bot_open_id（用于配置 FC 转发器的 FEISHU_AT_USER_ID）
+参数写法（很重要）：
+
+- 统一用“空格分隔”的 `key=value`（例如 `seed=1 steps=30`）
+- 如果值里有空格，建议不要用这种值（会被拆成多段，机器人读不懂）
+
+- `/help`：查看帮助  
+  示例：`/help`
+- `/panel`：发送控制面板卡片  
+  示例：`/panel`
+- `/run_default`：运行默认工作流（workflows 里配置的 default_workflow）  
+  示例：`/run_default`
+- `/run ...`：运行默认工作流，并支持覆盖参数  
+  示例：`/run seed=1 steps=30 prompt=hello`
+- `/wf <workflowKey> ...`：运行指定 workflow key，并支持覆盖参数  
+  示例：`/wf klein_add_real_details seed=1 steps=30 prompt=hello`  
+  示例：`/wf klein_add_real_details 3.seed=1 10.text=hello`
+- `/cb ...`：公网转发器触发用（正常不需要手动调用）  
+  示例：`/cb provider=runninghub id=2058921669074444290 sig=xxxx`
+- `/ids`：获取 chat_id / user_open_id  
+  示例：`/ids`
+- `/botid`：获取 bot_open_id（用于配置 FC 转发器的 FEISHU_AT_USER_ID）  
+  示例：`/botid`
 
 群聊里如果你希望“@ 机器人 + 指令”也能生效，写法可以是：
 
