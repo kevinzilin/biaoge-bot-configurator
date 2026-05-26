@@ -359,6 +359,12 @@ async def _upload_local_file_for_provider(
     p = str(file_path or "").strip()
     if not p:
         raise RuntimeError("empty file_path")
+    if os.name == "nt":
+        if p.startswith("/") or p.startswith("\\"):
+            raise RuntimeError(f"file not found: {p} (looks like a Linux path; this bot is running on Windows, please use a local Windows path like E:\\\\pics\\\\a.jpg, or remove '@' if the file already exists on the ComfyUI machine)")
+    else:
+        if re.match(r"^[A-Za-z]:\\\\", p):
+            raise RuntimeError(f"file not found: {p} (looks like a Windows path; this bot is running on Linux, please use a local Linux path like /home/... , or remove '@' if the file already exists on the ComfyUI machine)")
     if not os.path.exists(p):
         raise RuntimeError(f"file not found: {p}")
     if not os.path.isfile(p):
