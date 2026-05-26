@@ -1,17 +1,19 @@
 .env
 .env.*
 !.env.example
+.venv/
 .trae/
 __pycache__/
 *.pyc
-*.pyo
+.pyo
 *.bak
+.pytest_cache/
 tmp/
 downloads/
-.venv/
 config/workflows.local.json
 config/workflows.*.local.json
 config/workflows.loca.json
+config/workflows.loca.json.bak
 
 scripts/
 python_3.12_代码加密/
