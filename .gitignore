@@ -12,8 +12,7 @@ tmp/
 downloads/
 config/workflows.local.json
 config/workflows.*.local.json
-config/workflows.loca.json
-config/workflows.loca.json.bak
+config/workflows.*.local.*
 
 scripts/
 python_3.12_代码加密/
