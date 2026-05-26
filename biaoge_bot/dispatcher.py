@@ -430,6 +430,71 @@ async def _resolve_file_refs_in_params(
                 return tail.strip()
         return v
 
+    def _collect_values_by_key(obj: Any, keys: set[str], limit: int = 10) -> list[Any]:
+        out2: list[Any] = []
+
+        def walk(x: Any) -> None:
+            if len(out2) >= limit:
+                return
+            if isinstance(x, dict):
+                for kk, vv in x.items():
+                    if isinstance(kk, str) and kk in keys and len(out2) < limit:
+                        out2.append(vv)
+                    walk(vv)
+                return
+            if isinstance(x, list):
+                for it2 in x:
+                    walk(it2)
+                return
+
+        walk(obj)
+        return out2
+
+    async def _pick_msg_attachment(selector: str) -> dict[str, Any] | None:
+        sel0 = str(selector or "").strip().lower() or "last"
+        info0 = ctx.runner.get_im_attachment(chat_id=trigger.chat_id, user_open_id=trigger.user_open_id, selector=sel0)
+        if info0:
+            return info0
+        if not ctx.im:
+            return None
+        cid = str(trigger.chat_id or "").strip()
+        if not cid:
+            return None
+        nth = 1
+        if sel0.startswith("last:"):
+            try:
+                nth = int(sel0.split(":", 1)[1])
+            except Exception:
+                nth = 1
+        nth = max(1, nth)
+        try:
+            items = await ctx.im.list_chat_messages(chat_id=cid, page_size=20)
+        except Exception:
+            return None
+        found: list[dict[str, Any]] = []
+        for it0 in items:
+            body = it0.get("body") if isinstance(it0.get("body"), dict) else {}
+            content_raw = body.get("content") if isinstance(body.get("content"), str) else it0.get("content")
+            if not isinstance(content_raw, str) or not content_raw:
+                continue
+            try:
+                obj = json.loads(content_raw)
+            except Exception:
+                continue
+            img_vals = _collect_values_by_key(obj, {"image_key", "imageKey"}, limit=5)
+            for v0 in img_vals:
+                if isinstance(v0, str) and v0.strip():
+                    found.append({"kind": "image", "key": v0.strip()})
+            file_vals = _collect_values_by_key(obj, {"file_key", "fileKey"}, limit=5)
+            for v1 in file_vals:
+                if isinstance(v1, str) and v1.strip():
+                    found.append({"kind": "file", "key": v1.strip()})
+            if len(found) >= nth:
+                break
+        if not found or nth > len(found):
+            return None
+        return found[nth - 1]
+
     out: dict[str, Any] = dict(params or {})
     for k, v in list(out.items()):
         if not isinstance(v, str):
@@ -445,9 +510,9 @@ async def _resolve_file_refs_in_params(
                 kind, sel = parse_msg_ref(s0)
                 if kind != "msg":
                     raise RuntimeError(f"unsupported msg ref: {v}")
-                info = ctx.runner.get_im_attachment(chat_id=trigger.chat_id, user_open_id=trigger.user_open_id, selector=sel or "last")
+                info = await _pick_msg_attachment(sel or "last")
                 if not info:
-                    raise RuntimeError("no recent attachment found for @msg:last (please send an image/file in this chat first; if the bot cannot receive non-@ messages in group chats, add @bot when sending the attachment, or use /api/upload)")
+                    raise RuntimeError("no recent attachment found for @msg:last (please send an image/file in this chat first; if the bot cannot receive non-@ messages in group chats, add @bot when sending the attachment, or use /api/upload; if the bot cannot see the attachment event, grant it message read permission so it can fetch recent messages)")
                 if not ctx.im:
                     raise RuntimeError("missing im client")
                 akey = str(info.get("key") or "").strip()
@@ -499,9 +564,9 @@ async def _resolve_file_refs_in_params(
                 kind, sel = parse_msg_ref(it)
                 if kind != "msg":
                     raise RuntimeError(f"unsupported msg ref: {it}")
-                info = ctx.runner.get_im_attachment(chat_id=trigger.chat_id, user_open_id=trigger.user_open_id, selector=sel or "last")
+                info = await _pick_msg_attachment(sel or "last")
                 if not info:
-                    raise RuntimeError("no recent attachment found for @msg:last (please send an image/file in this chat first; if the bot cannot receive non-@ messages in group chats, add @bot when sending the attachment, or use /api/upload)")
+                    raise RuntimeError("no recent attachment found for @msg:last (please send an image/file in this chat first; if the bot cannot receive non-@ messages in group chats, add @bot when sending the attachment, or use /api/upload; if the bot cannot see the attachment event, grant it message read permission so it can fetch recent messages)")
                 if not ctx.im:
                     raise RuntimeError("missing im client")
                 akey = str(info.get("key") or "").strip()

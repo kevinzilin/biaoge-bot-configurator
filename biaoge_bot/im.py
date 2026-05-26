@@ -177,3 +177,32 @@ class IMClient:
                 data = r.json()
                 raise RuntimeError(f"download_file failed: {data}")
             p.write_bytes(r.content)
+
+    async def list_chat_messages(self, *, chat_id: str, page_size: int = 20) -> list[dict[str, Any]]:
+        token = await self._auth.tenant_token()
+        cid = str(chat_id or "").strip()
+        if not cid:
+            return []
+        size = int(page_size or 20)
+        size = max(1, min(50, size))
+        url = "https://open.feishu.cn/open-apis/im/v1/messages"
+        last_err: Exception | None = None
+        for t in ("chat_id", "chat"):
+            try:
+                params = {"container_id_type": t, "container_id": cid, "page_size": size}
+                async with httpx.AsyncClient(timeout=10) as client:
+                    r = await client.get(url, headers={"Authorization": f"Bearer {token}"}, params=params)
+                r.raise_for_status()
+                data = r.json()
+                if data.get("code") not in (0, None):
+                    raise RuntimeError(f"list_chat_messages failed: {data}")
+                items = (data.get("data") or {}).get("items") or []
+                if isinstance(items, list):
+                    return [x for x in items if isinstance(x, dict)]
+                return []
+            except Exception as e:
+                last_err = e
+                continue
+        if last_err:
+            raise last_err
+        return []
