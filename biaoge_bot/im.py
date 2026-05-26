@@ -189,7 +189,7 @@ class IMClient:
         last_err: Exception | None = None
         for t in ("chat_id", "chat"):
             try:
-                params = {"container_id_type": t, "container_id": cid, "page_size": size}
+                params = {"container_id_type": t, "container_id": cid, "page_size": size, "sort_type": "ByCreateTimeDesc"}
                 async with httpx.AsyncClient(timeout=10) as client:
                     r = await client.get(url, headers={"Authorization": f"Bearer {token}"}, params=params)
                 r.raise_for_status()

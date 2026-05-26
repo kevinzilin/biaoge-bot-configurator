@@ -466,10 +466,7 @@ async def _resolve_file_refs_in_params(
             except Exception:
                 nth = 1
         nth = max(1, nth)
-        try:
-            items = await im_cli.list_chat_messages(chat_id=cid, page_size=20)
-        except Exception:
-            return None
+        items = await im_cli.list_chat_messages(chat_id=cid, page_size=20)
         found: list[dict[str, Any]] = []
         for it0 in items:
             body = it0.get("body") if isinstance(it0.get("body"), dict) else {}
@@ -511,7 +508,7 @@ async def _resolve_file_refs_in_params(
                     raise RuntimeError(f"unsupported msg ref: {v}")
                 info = await _pick_msg_attachment(sel or "last")
                 if not info:
-                    raise RuntimeError("no recent attachment found for @msg:last (please send an image/file in this chat first; if the bot cannot receive non-@ messages in group chats, add @bot when sending the attachment, or use /api/upload; if the bot cannot see the attachment event, grant it message read permission so it can fetch recent messages)")
+                    raise RuntimeError("no recent attachment found for @msg:last (please send an image/file in this chat first; if the bot cannot receive non-@ messages in group chats, add @bot when sending the attachment, or use /api/upload; if the bot cannot see the attachment event, grant it message read permission so it can fetch recent messages; note: history fetch reads recent messages only)")
                 akey = str(info.get("key") or "").strip()
                 akind = str(info.get("kind") or "").strip().lower()
                 fname = str(info.get("file_name") or "").strip()
@@ -563,7 +560,7 @@ async def _resolve_file_refs_in_params(
                     raise RuntimeError(f"unsupported msg ref: {it}")
                 info = await _pick_msg_attachment(sel or "last")
                 if not info:
-                    raise RuntimeError("no recent attachment found for @msg:last (please send an image/file in this chat first; if the bot cannot receive non-@ messages in group chats, add @bot when sending the attachment, or use /api/upload; if the bot cannot see the attachment event, grant it message read permission so it can fetch recent messages)")
+                    raise RuntimeError("no recent attachment found for @msg:last (please send an image/file in this chat first; if the bot cannot receive non-@ messages in group chats, add @bot when sending the attachment, or use /api/upload; if the bot cannot see the attachment event, grant it message read permission so it can fetch recent messages; note: history fetch reads recent messages only)")
                 akey = str(info.get("key") or "").strip()
                 akind = str(info.get("kind") or "").strip().lower()
                 fname = str(info.get("file_name") or "").strip()
