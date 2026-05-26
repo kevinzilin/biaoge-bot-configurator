@@ -336,6 +336,8 @@ def do_p2_im_message_receive_v1_factory(ctx: AppContext):
         sender = getattr(data.event, "sender", None)
         sender_id = getattr(sender, "sender_id", None) if sender else None
         user_open_id = getattr(sender_id, "open_id", None) if sender_id else None
+        if not user_open_id:
+            user_open_id = getattr(sender_id, "user_id", None) if sender_id else None
 
         try:
             img_vals = _collect_values_by_key(content, keys={"image_key", "imageKey"}, limit=5)

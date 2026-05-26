@@ -68,7 +68,7 @@ class QueueRunner:
     def get_im_attachment(self, *, chat_id: str | None, user_open_id: str | None, selector: str) -> dict[str, Any] | None:
         cid = str(chat_id or "").strip()
         uid = str(user_open_id or "").strip()
-        if not cid or not uid:
+        if not cid:
             return None
         sel = str(selector or "").strip().lower()
         nth = 1
@@ -79,7 +79,9 @@ class QueueRunner:
                 nth = 1
         nth = max(1, nth)
         with self._im_attach_lock:
-            lst = list(self._im_attachments.get((cid, uid), []))
+            lst: list[dict[str, Any]] = []
+            if uid:
+                lst = list(self._im_attachments.get((cid, uid), []))
             if not lst:
                 lst = list(self._im_attachments.get((cid, ""), []))
         if not lst:

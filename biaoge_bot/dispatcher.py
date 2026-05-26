@@ -447,7 +447,7 @@ async def _resolve_file_refs_in_params(
                     raise RuntimeError(f"unsupported msg ref: {v}")
                 info = ctx.runner.get_im_attachment(chat_id=trigger.chat_id, user_open_id=trigger.user_open_id, selector=sel or "last")
                 if not info:
-                    raise RuntimeError("no recent attachment found for @msg:last (please send an image/file first, then run the command)")
+                    raise RuntimeError("no recent attachment found for @msg:last (please send an image/file in this chat first; if the bot cannot receive non-@ messages in group chats, add @bot when sending the attachment, or use /api/upload)")
                 if not ctx.im:
                     raise RuntimeError("missing im client")
                 akey = str(info.get("key") or "").strip()
@@ -501,7 +501,7 @@ async def _resolve_file_refs_in_params(
                     raise RuntimeError(f"unsupported msg ref: {it}")
                 info = ctx.runner.get_im_attachment(chat_id=trigger.chat_id, user_open_id=trigger.user_open_id, selector=sel or "last")
                 if not info:
-                    raise RuntimeError("no recent attachment found for @msg:last (please send an image/file first, then run the command)")
+                    raise RuntimeError("no recent attachment found for @msg:last (please send an image/file in this chat first; if the bot cannot receive non-@ messages in group chats, add @bot when sending the attachment, or use /api/upload)")
                 if not ctx.im:
                     raise RuntimeError("missing im client")
                 akey = str(info.get("key") or "").strip()
