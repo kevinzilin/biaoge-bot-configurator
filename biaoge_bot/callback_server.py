@@ -10,9 +10,9 @@ from urllib.parse import unquote, urlparse
 from urllib.parse import urlencode
 
 import httpx
-from fastapi import Body, FastAPI, Request
+from fastapi import Body, Depends, FastAPI, File, Form, Request, UploadFile
 
-from .admin_config import register_admin
+from .admin_config import _require_admin, register_admin
 from .comfyui import ComfyUIClient
 from .context import AppContext
 from .im import IMClient
@@ -656,6 +656,73 @@ def create_callback_app(ctx: AppContext) -> FastAPI:
     @app.get("/healthz")
     async def healthz() -> dict[str, Any]:
         return {"ok": True}
+
+    @app.post("/api/upload", dependencies=[Depends(_require_admin)])
+    async def api_upload(
+        file: UploadFile = File(...),
+        provider: str = Form("comfyui"),
+        type: str = Form("input"),
+        overwrite: str = Form("true"),
+        subfolder: str = Form(""),
+    ) -> dict[str, Any]:
+        prov = str(provider or "").strip().lower() or "comfyui"
+        fname = str(getattr(file, "filename", "") or "upload.bin")
+        ctype = str(getattr(file, "content_type", "") or "application/octet-stream")
+
+        f0 = getattr(file, "file", None)
+        if f0 is None:
+            return {"ok": False, "error": "missing file"}
+        try:
+            f0.seek(0)
+        except Exception:
+            pass
+
+        if prov == "runninghub":
+            api_key = str(getattr(ctx.settings, "runninghub_api_key", "") or "").strip()
+            if not api_key:
+                return {"ok": False, "error": "missing RUNNINGHUB_API_KEY"}
+
+            headers = {"Host": "www.runninghub.cn", "Authorization": f"Bearer {api_key}"}
+            async with httpx.AsyncClient(timeout=120) as client:
+                r = await client.post(
+                    "https://www.runninghub.cn/openapi/v2/media/upload/binary",
+                    headers=headers,
+                    files={"file": (fname, f0, ctype)},
+                )
+            r.raise_for_status()
+            obj = r.json()
+            if not isinstance(obj, dict):
+                return {"ok": False, "error": "runninghub response invalid"}
+            code = obj.get("code")
+            if code not in (0, "0", None):
+                return {"ok": False, "error": str(obj.get("message") or obj.get("msg") or f"runninghub error: {obj}")}
+            data = obj.get("data") or {}
+            if not isinstance(data, dict):
+                data = {}
+            ref = str(data.get("fileName") or "").strip()
+            if not ref:
+                return {"ok": False, "error": "runninghub upload ok but missing fileName"}
+            return {"ok": True, "provider": "runninghub", "ref": ref, "raw": data}
+
+        base_url = str(getattr(ctx.settings, "comfyui_base_url", "") or "").strip().rstrip("/")
+        if not base_url:
+            return {"ok": False, "error": "missing COMFYUI_BASE_URL"}
+
+        data = {"type": str(type or "input").strip() or "input", "overwrite": "true" if str(overwrite).strip().lower() in ("1", "true", "yes", "y", "on") else "false"}
+        sf = str(subfolder or "").strip()
+        if sf:
+            data["subfolder"] = sf
+
+        async with httpx.AsyncClient(timeout=120) as client:
+            r = await client.post(f"{base_url}/upload/image", data=data, files={"image": (fname, f0, ctype)})
+        r.raise_for_status()
+        obj = r.json()
+        if not isinstance(obj, dict):
+            return {"ok": False, "error": "comfyui response invalid"}
+        name = str(obj.get("name") or fname).strip()
+        sub = str(obj.get("subfolder") or "").strip()
+        ref = f"{sub}/{name}" if sub else name
+        return {"ok": True, "provider": "comfyui", "ref": ref, "raw": obj}
 
     register_admin(app, ctx)
 
