@@ -76,6 +76,51 @@
 - `@机器人 /ids`
 - `/ids @机器人`
 
+## BITABLE_MODE 情景（只读/只写/读写/关闭）
+
+### 情景1：关闭表格读写（BITABLE_MODE=off）
+
+- 用法：只靠指令传参入队，不读表、不写表
+- 示例（直接指定参数）：
+  - `/wf klein_add_real_details prompt="hello world"`
+- 示例（带附件：先上传本机文件再执行）：
+  - `/wf klein_add_real_details images="@E:\pics\my a.jpg" prompt="hello world"`
+- 注意：
+  - 因为不读表格，不会自动下载表格附件；你需要通过指令直传参数
+  - 附件输入推荐用 `@本机路径`：机器人会先上传（ComfyUI/RunningHub）再替换为执行端识别的文件名
+  - 私有云 ComfyUI / RunningHub：若要接收回调并发消息，需要配置公网转发器（REMOTE_CALLBACK_URL）
+
+### 情景2：只开启表格读（BITABLE_MODE=read）
+
+- 用法：从表格读取字段/附件，入队时替换参数，但不回写状态/结果
+- 示例（指定记录）：
+  - `/wf klein_add_real_details record=recxxxx table=prod_table`
+- 示例（用行号定位记录）：
+  - `/wf klein_add_real_details row=6 table=prod_table`
+  - 如果你想按“某个视图里看到的第 N 行”对齐，临时指定视图：`/wf klein_add_real_details row=6 view=vewxxxx table=prod_table`
+- 注意：
+  - 只读模式不会写回，所以表格里状态不会变化
+  - 表格附件会先下载到本机，再根据执行端做处理：
+    - RunningHub：会自动上传，传入参数会替换成 `openapi/...` 这种文件名
+    - ComfyUI：如果 `COMFYUI_UPLOAD_ENABLED=1` 会自动上传到 ComfyUI input；否则会尝试用 `COMFYUI_INPUT_DIR`/本地路径（取决于你的配置与节点兼容性）
+
+### 情景3：开启表格读写（BITABLE_MODE=readwrite）
+
+- 用法：本项目主模式（队列跑批 + 回写状态/结果）
+- 示例：
+  - `/drain klein_add_real_details table=prod_table batch=10 inflight=1`
+
+### 情景4：只开启表格写（BITABLE_MODE=write）
+
+- 用法：参数从指令传入；输出写回表格；不从表格读取输入字段/附件
+- 示例（写回指定记录）：
+  - `/wf klein_add_real_details record=recxxxx table=prod_table prompt="hello"`
+- 示例（写回第 N 行对应的记录，支持 row=4）：
+  - `/wf klein_add_real_details row=4 table=prod_table prompt="hello"`
+- 注意：
+  - 只写模式下，即使表格里有“提示词/参考图”等字段，也不会被当作输入读取；你仍需要在指令里把参数传全（包括附件用 `@...`）
+  - 如果你不提供 record/row，而表格又可读，程序可能会自动取下一条 queued 记录作为写回目标
+
 ## 公网转发器（阿里云 FC）配置要点
 
 转发器示例代码：`aliyun_fc_forwarder/handler.py`
