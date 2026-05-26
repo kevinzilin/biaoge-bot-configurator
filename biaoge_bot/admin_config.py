@@ -44,7 +44,26 @@ def _env_path() -> Path:
 
 
 def _workflow_path() -> Path:
-    return _repo_root() / "config" / "workflows.loca.json"
+    root = _repo_root()
+    env_p = _env_path()
+    try:
+        _, values = _read_env_file(env_p)
+        raw = str(values.get("WORKFLOW_CONFIG_PATH") or "").strip()
+        raw = raw.strip('"').strip("'")
+        if raw:
+            p = Path(raw)
+            if not p.is_absolute():
+                p = (root / raw).resolve()
+            else:
+                p = p.resolve()
+            try:
+                p.relative_to(root.resolve())
+                return p
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return root / "config" / "workflows.loca.json"
 
 
 def _is_sensitive_key(key: str) -> bool:
