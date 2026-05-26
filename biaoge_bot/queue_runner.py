@@ -58,11 +58,12 @@ class QueueRunner:
             return
         item: dict[str, Any] = {"kind": k0, "key": key0, "file_name": str(file_name or "").strip() or None, "message_id": str(message_id or "").strip() or None, "ts": time.time()}
         with self._im_attach_lock:
-            lst = list(self._im_attachments.get((cid, uid), []))
-            lst.append(item)
-            lst = [x for x in lst if isinstance(x, dict)]
-            lst = lst[-10:]
-            self._im_attachments[(cid, uid)] = lst
+            for k in ((cid, uid), (cid, "")):
+                lst = list(self._im_attachments.get(k, []))
+                lst.append(item)
+                lst = [x for x in lst if isinstance(x, dict)]
+                lst = lst[-10:]
+                self._im_attachments[k] = lst
 
     def get_im_attachment(self, *, chat_id: str | None, user_open_id: str | None, selector: str) -> dict[str, Any] | None:
         cid = str(chat_id or "").strip()
@@ -79,6 +80,8 @@ class QueueRunner:
         nth = max(1, nth)
         with self._im_attach_lock:
             lst = list(self._im_attachments.get((cid, uid), []))
+            if not lst:
+                lst = list(self._im_attachments.get((cid, ""), []))
         if not lst:
             return None
         if nth > len(lst):

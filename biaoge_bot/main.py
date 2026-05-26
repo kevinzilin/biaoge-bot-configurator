@@ -94,6 +94,27 @@ def _parse_message_content_json(msg_content: str) -> dict[str, Any]:
         return {}
 
 
+def _collect_values_by_key(obj: Any, *, keys: set[str], limit: int = 10) -> list[Any]:
+    out: list[Any] = []
+
+    def walk(x: Any) -> None:
+        if len(out) >= limit:
+            return
+        if isinstance(x, dict):
+            for k, v in x.items():
+                if isinstance(k, str) and k in keys and len(out) < limit:
+                    out.append(v)
+                walk(v)
+            return
+        if isinstance(x, list):
+            for it in x:
+                walk(it)
+            return
+
+    walk(obj)
+    return out
+
+
 def _collect_mention_ids(msg: Any, content: dict[str, Any]) -> list[str]:
     out: list[str] = []
     ms = getattr(msg, "mentions", None)
@@ -317,12 +338,14 @@ def do_p2_im_message_receive_v1_factory(ctx: AppContext):
         user_open_id = getattr(sender_id, "open_id", None) if sender_id else None
 
         try:
-            img_key = content.get("image_key") or content.get("imageKey")
-            if isinstance(img_key, str) and img_key.strip():
-                ctx.runner.register_im_attachment(chat_id=chat_id, user_open_id=user_open_id, kind="image", key=img_key.strip(), message_id=msg_id)
-            file_key = content.get("file_key") or content.get("fileKey")
-            if isinstance(file_key, str) and file_key.strip():
-                ctx.runner.register_im_attachment(chat_id=chat_id, user_open_id=user_open_id, kind="file", key=file_key.strip(), message_id=msg_id)
+            img_vals = _collect_values_by_key(content, keys={"image_key", "imageKey"}, limit=5)
+            for v in img_vals:
+                if isinstance(v, str) and v.strip():
+                    ctx.runner.register_im_attachment(chat_id=chat_id, user_open_id=user_open_id, kind="image", key=v.strip(), message_id=msg_id)
+            file_vals = _collect_values_by_key(content, keys={"file_key", "fileKey"}, limit=5)
+            for v in file_vals:
+                if isinstance(v, str) and v.strip():
+                    ctx.runner.register_im_attachment(chat_id=chat_id, user_open_id=user_open_id, kind="file", key=v.strip(), message_id=msg_id)
         except Exception:
             pass
 
@@ -403,6 +426,9 @@ def main() -> None:
         .register_p2_im_message_receive_v1(do_p2_im_message_receive_v1_factory(ctx))
         .register_p2_card_action_trigger(do_card_action_trigger_factory(ctx))
     )
+    if hasattr(builder, "register_p2_customized_event"):
+        getattr(builder, "register_p2_customized_event")("im.message.reaction.created_v1", _ignore_event)
+        getattr(builder, "register_p2_customized_event")("im.message.reaction.deleted_v1", _ignore_event)
     if hasattr(builder, "register_p2_im_message_message_read_v1"):
         getattr(builder, "register_p2_im_message_message_read_v1")(_ignore_event)
     else:
