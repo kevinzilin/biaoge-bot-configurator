@@ -198,6 +198,29 @@ try {
   Write-Host ("Fix pyvenv.cfg failed: " + ($_ | Out-String).Trim()) -ForegroundColor Yellow
 }
 
+function Ensure-VenvModule {
+  param(
+    [Parameter(Mandatory = $true)] [string] $VenvPythonExe,
+    [Parameter(Mandatory = $true)] [string] $ModuleName,
+    [Parameter(Mandatory = $true)] [string] $PipPackageName
+  )
+  try {
+    & $VenvPythonExe -c ("import " + $ModuleName) 2>$null
+    if ($LASTEXITCODE -eq 0) { return }
+  } catch {}
+  Write-Host ""
+  Write-Host ("Installing missing dependency: " + $PipPackageName) -ForegroundColor Cyan
+  try { & $VenvPythonExe -m pip install --upgrade pip } catch {}
+  & $VenvPythonExe -m pip install $PipPackageName
+}
+
+try {
+  Ensure-VenvModule -VenvPythonExe $venvPy -ModuleName "multipart" -PipPackageName "python-multipart"
+} catch {
+  Write-Host ""
+  Write-Host ("Dependency check failed: " + ($_ | Out-String).Trim()) -ForegroundColor Yellow
+}
+
 $envMap = Read-DotEnv -Path (Join-Path $root ".env")
 
 if ($envMap.ContainsKey("WORKFLOW_CONFIG_PATH")) {
