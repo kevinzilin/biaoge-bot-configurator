@@ -1,0 +1,191 @@
+{
+  "default_table": "klein_table",
+  "default_workflow": "klein_add_real_details_local",
+  "tables": {
+    "klein_table": {
+      "app_token": "${BITABLE_APP_TOKEN_KLEIN}",
+      "table_id": "${BITABLE_TABLE_ID_KLEIN}",
+      "view_id": "",
+      "fields": {
+        "status": "任务状态",
+        "output": "生成结果",
+        "error": "错误信息",
+        "prompt_id": "任务ID",
+        "created_time": "创建时间"
+      },
+      "status_values": {
+        "queued": "待处理",
+        "running": "处理中",
+        "done": "已完成",
+        "failed": "生成失败"
+      }
+    }
+  },
+  "workflows": {
+    "klein_add_real_details_local": {
+      "workflowName": "klein添加真实细节",
+      "apiWorkflowPath": "d:\\\\www\\\\biaoge\\\\klein添加真实细节.json",
+      "comfyuiBaseUrl": "http://127.0.0.1:8188",
+      "table": "klein_table",
+      "recordFields": {
+        "prompt": "提示词",
+        "images": "参考图"
+      },
+      "writeBackFields": {
+        "output": "生成结果",
+        "status": "任务状态",
+        "error": "失败原因",
+        "prompt_id": "任务ID"
+      },
+      "params": {
+        "prompt": {
+          "targets": [
+            { "nodeId": "449", "fieldName": "text" }
+          ],
+          "type": "str"
+        },
+        "images": {
+          "targets": [
+            { "nodeId": "448", "fieldName": "image", "index": 0 },
+            { "nodeId": "481", "fieldName": "image", "index": 1 }
+          ],
+          "type": "str"
+        }
+      }
+    },
+    "klein_add_real_details_private": {
+      "workflowName": "klein添加真实细节",
+      "apiWorkflowPath": "d:\\\\www\\\\biaoge\\\\klein添加真实细节.json",
+      "comfyuiBaseUrl": "http://<your-private-comfyui-host>:7001",
+      "table": "klein_table",
+      "recordFields": {
+        "prompt": "提示词",
+        "images": "参考图"
+      },
+      "writeBackFields": {
+        "output": "生成结果",
+        "status": "任务状态",
+        "error": "失败原因",
+        "prompt_id": "任务ID"
+      },
+      "params": {
+        "prompt": {
+          "targets": [
+            { "nodeId": "449", "fieldName": "text" }
+          ],
+          "type": "str"
+        },
+        "images": {
+          "targets": [
+            { "nodeId": "448", "fieldName": "image", "index": 0 },
+            { "nodeId": "481", "fieldName": "image", "index": 1 }
+          ],
+          "type": "str"
+        }
+      }
+    },
+    "klein_add_real_details_runninghub": {
+      "provider": "runninghub",
+      "workflowName": "klein添加真实细节",
+      "table": "klein_table",
+      "runninghub": {
+        "workflowId": "1904136902449209346",
+        "retainSeconds": 60,
+        "instanceType": "plus",
+        "usePersonalQueue": false,
+        "addMetadata": true
+      },
+      "recordFields": {
+        "prompt": "提示词",
+        "images": "参考图"
+      },
+      "writeBackFields": {
+        "output": "生成结果",
+        "status": "任务状态",
+        "error": "失败原因",
+        "prompt_id": "任务ID"
+      },
+      "params": {
+        "prompt": {
+          "targets": [
+            { "nodeId": "449", "fieldName": "text" }
+          ],
+          "type": "str"
+        },
+        "images": {
+          "targets": [
+            { "nodeId": "448", "fieldName": "image", "index": 0 },
+            { "nodeId": "481", "fieldName": "image", "index": 1 }
+          ],
+          "type": "str"
+        }
+      }
+    },
+    "klein_add_real_details_bitable_off": {
+      "workflowName": "klein添加真实细节",
+      "apiWorkflowPath": "d:\\\\www\\\\biaoge\\\\klein添加真实细节.json",
+      "comfyuiBaseUrl": "http://127.0.0.1:8188",
+      "params": {
+        "prompt": {
+          "targets": [
+            { "nodeId": "449", "fieldName": "text" }
+          ],
+          "type": "str"
+        },
+        "images": {
+          "targets": [
+            { "nodeId": "448", "fieldName": "image", "index": 0 },
+            { "nodeId": "481", "fieldName": "image", "index": 1 }
+          ],
+          "type": "str"
+        }
+      }
+    },
+    "klein_add_real_details_bitable_off_private": {
+      "workflowName": "klein添加真实细节",
+      "apiWorkflowPath": "d:\\\\www\\\\biaoge\\\\klein添加真实细节.json",
+      "comfyuiBaseUrl": "http://<your-private-comfyui-host>:7001",
+      "params": {
+        "prompt": {
+          "targets": [
+            { "nodeId": "449", "fieldName": "text" }
+          ],
+          "type": "str"
+        },
+        "images": {
+          "targets": [
+            { "nodeId": "448", "fieldName": "image", "index": 0 },
+            { "nodeId": "481", "fieldName": "image", "index": 1 }
+          ],
+          "type": "str"
+        }
+      }
+    },
+    "klein_add_real_details_bitable_off_runninghub": {
+      "provider": "runninghub",
+      "workflowName": "klein添加真实细节",
+      "runninghub": {
+        "workflowId": "1904136902449209346",
+        "retainSeconds": 60,
+        "instanceType": "plus",
+        "usePersonalQueue": false,
+        "addMetadata": true
+      },
+      "params": {
+        "prompt": {
+          "targets": [
+            { "nodeId": "449", "fieldName": "text" }
+          ],
+          "type": "str"
+        },
+        "images": {
+          "targets": [
+            { "nodeId": "448", "fieldName": "image", "index": 0 },
+            { "nodeId": "481", "fieldName": "image", "index": 1 }
+          ],
+          "type": "str"
+        }
+      }
+    }
+  }
+}
