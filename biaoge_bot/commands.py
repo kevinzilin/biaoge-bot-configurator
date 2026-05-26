@@ -13,6 +13,46 @@ class Command:
 
 _SPACE = re.compile(r"\s+")
 
+def _split_tokens(text: str) -> list[str]:
+    s = str(text or "")
+    out: list[str] = []
+    buf: list[str] = []
+    quote: str | None = None
+    i = 0
+    n = len(s)
+    while i < n:
+        ch = s[i]
+        if quote is not None:
+            if ch == quote:
+                quote = None
+                i += 1
+                continue
+            if ch == "\\" and i + 1 < n and s[i + 1] in (quote, "\\"):
+                buf.append(s[i + 1])
+                i += 2
+                continue
+            buf.append(ch)
+            i += 1
+            continue
+
+        if ch in ('"', "'", "`"):
+            quote = ch
+            i += 1
+            continue
+
+        if ch.isspace():
+            if buf:
+                out.append("".join(buf))
+                buf = []
+            i += 1
+            continue
+
+        buf.append(ch)
+        i += 1
+    if buf:
+        out.append("".join(buf))
+    return out
+
 
 def _parse_kv(tok: str) -> tuple[str, str] | None:
     if "=" not in tok:
@@ -27,7 +67,7 @@ def _parse_kv(tok: str) -> tuple[str, str] | None:
 
 def parse_message_text(text: str) -> Command | None:
     text = (text or "").strip()
-    parts0 = [p for p in _SPACE.split(text) if p]
+    parts0 = _split_tokens(text)
     if not parts0:
         return None
     idx = None

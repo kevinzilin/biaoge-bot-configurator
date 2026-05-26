@@ -54,7 +54,8 @@ python -m biaoge_bot.main
 参数写法（很重要）：
 
 - 统一用“空格分隔”的 `key=value`（例如 `seed=1 steps=30`）
-- 如果值里有空格，建议不要用这种值（会被拆成多段，机器人读不懂）
+- 如果值里有空格，用引号包起来（现在支持）：例如 `prompt="hello world"`、`images="@E:\pics\my a.jpg"`
+- 如果你想让机器人“先上传本机文件再执行”，在值前面加 `@`：例如 `images=@E:\pics\a.jpg`
 
 - `/help`：查看帮助  
   示例：`/help`

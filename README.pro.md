@@ -20,7 +20,8 @@
 参数写法（很重要）：
 
 - 统一用“空格分隔”的 `key=value`（例如 `seed=1 steps=30`）
-- 如果值里有空格，建议不要用这种值（会被拆成多段，机器人读不懂）；优先改成不含空格的值，或改用工作流 key
+- 如果值里有空格，用引号包起来（现在支持）：例如 `prompt="hello world"`、`images="@E:\pics\my a.jpg"`
+- 如果你想让机器人“先上传本机文件再执行”，在值前面加 `@`：例如 `images=@E:\pics\a.jpg`
 
 基础指令：
 
@@ -47,10 +48,12 @@
 
 队列/跑批（需要表格配置与授权可用）：
 
-- `/batch <workflowKey> table=<tableKey> batch=<N> inflight=<N>`：从表格里取 queued 任务，批量跑一段  
-  示例：`/batch klein_add_real_details table=klein_table batch=10 inflight=1`
-- `/drain <workflowKey> table=<tableKey> batch=<N> inflight=<N>`：持续处理队列直到耗尽  
-  示例：`/drain klein_add_real_details table=klein_table batch=10 inflight=1`
+- `/batch <workflowKey> table=<tableKey> batch=<N> inflight=<N>`：从表格里取 queued 任务，批量跑一段（table 可省略：优先用该 workflow 配置的 table；未配置则用 default_table）  
+  示例：`/batch klein_add_real_details table=klein_table batch=10 inflight=1`  
+  示例：`/batch klein_add_real_details batch=10 inflight=1`
+- `/drain <workflowKey> table=<tableKey> batch=<N> inflight=<N>`：持续处理队列直到耗尽（table 可省略：优先用该 workflow 配置的 table；未配置则用 default_table）  
+  示例：`/drain klein_add_real_details table=klein_table batch=10 inflight=1`  
+  示例：`/drain klein_add_real_details batch=10 inflight=1`
 - `/stop_queue <workflowKey> table=<tableKey>`：停止当前的批量/队列任务  
   示例：`/stop_queue klein_add_real_details table=klein_table`
 

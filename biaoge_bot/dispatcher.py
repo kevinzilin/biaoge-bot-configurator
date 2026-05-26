@@ -171,6 +171,20 @@ def _pick_default_workflow_key(ctx: AppContext, *, table_key: str | None) -> str
     return first.key if first else None
 
 
+def _pick_table_key_for_workflow(ctx: AppContext, *, args: dict[str, Any], workflow_key: str | None) -> str | None:
+    t = _pick_table_key(args)
+    if t:
+        return t
+    wk = str(workflow_key or "").strip()
+    if wk:
+        wf_cfg = (ctx.config.get("workflows") or {}).get(wk) or {}
+        if isinstance(wf_cfg, dict):
+            v = wf_cfg.get("table")
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+    return ctx.default_table_key
+
+
 def _b64url_json_decode(data: str) -> dict[str, Any] | None:
     s = str(data or "").strip()
     if not s:
@@ -202,6 +216,7 @@ async def handle_help(im: IMClient, chat_id: str) -> None:
             "/wf <workflow> row=6 seed=1 steps=30 prompt=...  —— 指定工作流和行号运行\n"
             "/wf <workflow> row=6 view=vewxxxx  —— 指定工作流、视图及行号运行\n"
             "/wf <workflow> 3.seed=1 10.text=hello  —— 指定工作流运行并直接覆盖节点参数\n"
+            "/wf <workflow> images=@E:\\\\pics\\\\a.jpg  —— 本机文件上传后再执行（支持用引号包住带空格的路径）\n"
             "/batch <workflow> table=face_table batch=10 inflight=1  —— 批量运行指定数量的任务\n"
             "/drain <workflow> table=face_table batch=10 inflight=1  —— 持续处理队列直到耗尽\n"
             "/stop_queue <workflow> table=face_table  —— 停止当前的批量/队列任务\n"
@@ -310,20 +325,16 @@ async def _download_attachments(
             except Exception:
                 pass
         elif ctx.settings.comfyui_upload_enabled:
-            suffix = Path(saved).suffix.lower()
-            if suffix in (".png", ".jpg", ".jpeg", ".webp", ".gif"):
-                uploaded = await comfyui.upload_image(
-                    file_path=saved,
-                    filename=Path(saved).name,
-                    type="input",
-                    overwrite=ctx.settings.comfyui_upload_overwrite,
-                    subfolder=ctx.settings.comfyui_upload_subfolder,
-                )
-                name = str(uploaded.get("name") or Path(saved).name)
-                sub = str(uploaded.get("subfolder") or "")
-                out.append(f"{sub}/{name}" if sub else name)
-            else:
-                out.append(Path(saved).name)
+            uploaded = await comfyui.upload_image(
+                file_path=saved,
+                filename=Path(saved).name,
+                type="input",
+                overwrite=ctx.settings.comfyui_upload_overwrite,
+                subfolder=ctx.settings.comfyui_upload_subfolder,
+            )
+            name = str(uploaded.get("name") or Path(saved).name)
+            sub = str(uploaded.get("subfolder") or "")
+            out.append(f"{sub}/{name}" if sub else name)
             try:
                 if os.path.exists(saved) and ctx.settings.bitable_download_dir in os.path.abspath(saved):
                     os.remove(saved)
@@ -333,6 +344,127 @@ async def _download_attachments(
             out.append(Path(saved).name)
         else:
             out.append(saved)
+    return out
+
+
+async def _upload_local_file_for_provider(
+    *,
+    provider: str,
+    comfyui: ComfyUIClient,
+    runninghub: RunningHubClient | None,
+    file_path: str,
+    overwrite: bool,
+    subfolder: str | None,
+) -> str:
+    p = str(file_path or "").strip()
+    if not p:
+        raise RuntimeError("empty file_path")
+    if not os.path.exists(p):
+        raise RuntimeError(f"file not found: {p}")
+    if not os.path.isfile(p):
+        raise RuntimeError(f"not a file: {p}")
+
+    if provider == "runninghub":
+        if not runninghub:
+            raise RuntimeError("missing runninghub client")
+        uploaded = await runninghub.upload_media_binary(file_path=p)
+        fv = _runninghub_node_file_value(uploaded.file_name or "")
+        if not fv:
+            raise RuntimeError("runninghub upload ok but missing fileName")
+        return fv
+
+    uploaded = await comfyui.upload_image(
+        file_path=p,
+        filename=Path(p).name,
+        type="input",
+        overwrite=overwrite,
+        subfolder=subfolder,
+    )
+    name = str(uploaded.get("name") or Path(p).name)
+    sub = str(uploaded.get("subfolder") or "")
+    return f"{sub}/{name}" if sub else name
+
+
+async def _resolve_file_refs_in_params(
+    ctx: AppContext,
+    *,
+    provider: str,
+    comfyui: ComfyUIClient,
+    runninghub: RunningHubClient | None,
+    wf: WorkflowSpec,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    def is_inline_node_key(k: str) -> bool:
+        return bool(_INLINE_NODE_KEY.match(str(k)))
+
+    def is_file_ref(s: str) -> bool:
+        v = str(s or "").strip()
+        return v.startswith("@") or (":@" in v and v.split(":@", 1)[0] in ("file", "image", "video", "audio"))
+
+    def strip_file_ref(s: str) -> str:
+        v = str(s or "").strip()
+        if v.startswith("@"):
+            return v[1:].strip()
+        if ":@" in v:
+            head, tail = v.split(":@", 1)
+            if head in ("file", "image", "video", "audio"):
+                return tail.strip()
+        return v
+
+    out: dict[str, Any] = dict(params or {})
+    for k, v in list(out.items()):
+        if not isinstance(v, str):
+            continue
+        s0 = v.strip()
+        if not is_file_ref(s0):
+            continue
+
+        if is_inline_node_key(str(k)):
+            if "," in s0:
+                raise RuntimeError(f"inline node param does not support multiple files: {k}={v}")
+            p = strip_file_ref(s0)
+            out[k] = await _upload_local_file_for_provider(
+                provider=provider,
+                comfyui=comfyui,
+                runninghub=runninghub,
+                file_path=p,
+                overwrite=ctx.settings.comfyui_upload_overwrite,
+                subfolder=ctx.settings.comfyui_upload_subfolder,
+            )
+            continue
+
+        parts = [x.strip() for x in s0.split(",")] if "," in s0 else [s0]
+        resolved_list: list[str] = []
+        changed = False
+        for it in parts:
+            if not it:
+                continue
+            if is_file_ref(it):
+                p = strip_file_ref(it)
+                resolved_list.append(
+                    await _upload_local_file_for_provider(
+                        provider=provider,
+                        comfyui=comfyui,
+                        runninghub=runninghub,
+                        file_path=p,
+                        overwrite=ctx.settings.comfyui_upload_overwrite,
+                        subfolder=ctx.settings.comfyui_upload_subfolder,
+                    )
+                )
+                changed = True
+            else:
+                resolved_list.append(it)
+
+        if not changed:
+            continue
+
+        if len(resolved_list) <= 1:
+            out[k] = resolved_list[0] if resolved_list else ""
+        else:
+            if str(k) in (wf.params or {}):
+                out[k] = resolved_list
+            else:
+                raise RuntimeError(f"param does not support multiple files (not in workflow params): {k}={v}")
     return out
 
 
@@ -678,6 +810,15 @@ async def run_workflow(
         if "save_prefix_2" in wf.params and "save_prefix_2" not in params:
             merged["save_prefix_2"] = f"ComfyUI_out_2_{record_id}"
 
+    params = await _resolve_file_refs_in_params(
+        ctx,
+        provider=provider,
+        comfyui=comfyui_client,
+        runninghub=runninghub_client,
+        wf=wf,
+        params=params,
+    )
+
     merged.update(params)
 
     temp_files: list[str] = []
@@ -886,10 +1027,20 @@ async def dispatch(ctx: AppContext, *, name: str, args: dict[str, Any], trigger:
         bot_open_id = None
         try:
             d0 = data.get("data") if isinstance(data, dict) else None
-            b0 = d0.get("bot") if isinstance(d0, dict) else None
-            v = b0.get("open_id") if isinstance(b0, dict) else None
-            if isinstance(v, str) and v.strip():
-                bot_open_id = v.strip()
+            if isinstance(d0, dict):
+                b0 = d0.get("bot")
+                if isinstance(b0, dict):
+                    for k in ("open_id", "openId", "bot_open_id", "botOpenId"):
+                        v = b0.get(k)
+                        if isinstance(v, str) and v.strip():
+                            bot_open_id = v.strip()
+                            break
+                if not bot_open_id:
+                    for k in ("open_id", "openId", "bot_open_id", "botOpenId"):
+                        v = d0.get(k)
+                        if isinstance(v, str) and v.strip():
+                            bot_open_id = v.strip()
+                            break
         except Exception:
             bot_open_id = None
         if bot_open_id:
@@ -1067,17 +1218,18 @@ async def dispatch(ctx: AppContext, *, name: str, args: dict[str, Any], trigger:
         return
 
     if name in ("batch", "drain"):
-        table_key = _pick_table_key(args) or ctx.default_table_key
+        base_table_key = _pick_table_key(args) or ctx.default_table_key
         workflow_key = _pick_workflow_key(args) or str(args.get("workflow") or "")
         
         if not workflow_key:
-            workflow_key = _pick_default_workflow_key(ctx, table_key=table_key) or "default"
+            workflow_key = _pick_default_workflow_key(ctx, table_key=base_table_key) or "default"
         
         if not workflow_key or (workflow_key == "default" and not ctx.workflows.get("default")):
             if trigger.chat_id:
                 await im.send_text(chat_id=trigger.chat_id, text="缺少 workflow 且未找到默认工作流配置")
             return
             
+        table_key = _pick_table_key_for_workflow(ctx, args=args, workflow_key=workflow_key)
         if not table_key:
             if trigger.chat_id:
                 await im.send_text(chat_id=trigger.chat_id, text="缺少 table")
@@ -1112,11 +1264,12 @@ async def dispatch(ctx: AppContext, *, name: str, args: dict[str, Any], trigger:
 
     if name == "stop_queue":
         workflow_key = _pick_workflow_key(args) or str(args.get("workflow") or "")
-        table_key = _pick_table_key(args) or ctx.default_table_key
+        base_table_key = _pick_table_key(args) or ctx.default_table_key
         
         if not workflow_key:
-            workflow_key = _pick_default_workflow_key(ctx, table_key=table_key) or "default"
+            workflow_key = _pick_default_workflow_key(ctx, table_key=base_table_key) or "default"
 
+        table_key = _pick_table_key_for_workflow(ctx, args=args, workflow_key=workflow_key)
         if workflow_key and table_key:
             await ctx.runner.stop(workflow_key=workflow_key, table_key=table_key)
             if trigger.chat_id:
