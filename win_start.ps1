@@ -198,6 +198,52 @@ try {
   Write-Host ("Fix pyvenv.cfg failed: " + ($_ | Out-String).Trim()) -ForegroundColor Yellow
 }
 
+function Fix-VenvActivationScripts {
+  param([Parameter(Mandatory = $true)] [string] $VenvRoot)
+
+  $vr = $VenvRoot
+  try { $vr = (Resolve-Path -LiteralPath $VenvRoot).Path } catch {}
+  if (-not $vr) { return }
+  $vrWin = $vr
+
+  $actBat = Join-Path $VenvRoot "Scripts\activate.bat"
+  if (Test-Path $actBat) {
+    try {
+      $lines = Get-Content -LiteralPath $actBat -ErrorAction SilentlyContinue
+      if ($lines) {
+        $changed = $false
+        $out = @()
+        foreach ($line in $lines) {
+          if ($line -match '^set\s+VIRTUAL_ENV=') {
+            $out += ("set VIRTUAL_ENV=" + $vrWin)
+            $changed = $true
+          } else {
+            $out += $line
+          }
+        }
+        if ($changed) { Set-Content -LiteralPath $actBat -Value $out -Encoding UTF8 }
+      }
+    } catch {}
+  }
+
+  $actSh = Join-Path $VenvRoot "Scripts\activate"
+  if (Test-Path $actSh) {
+    try {
+      $txt = Get-Content -LiteralPath $actSh -Raw -ErrorAction SilentlyContinue
+      if ($txt) {
+        $txt2 = $txt
+        $txt2 = [regex]::Replace($txt2, 'cygpath\s+"[^"]*?\\.venv"', ('cygpath "' + $vrWin.Replace('\','\\') + '"'))
+        $txt2 = [regex]::Replace($txt2, 'export\s+VIRTUAL_ENV="[^"]*?\\.venv"', ('export VIRTUAL_ENV="' + $vrWin.Replace('\','\\') + '"'))
+        if ($txt2 -ne $txt) { Set-Content -LiteralPath $actSh -Value $txt2 -Encoding UTF8 }
+      }
+    } catch {}
+  }
+}
+
+try {
+  Fix-VenvActivationScripts -VenvRoot (Join-Path $root ".venv")
+} catch {}
+
 function Ensure-VenvModule {
   param(
     [Parameter(Mandatory = $true)] [string] $VenvPythonExe,
