@@ -785,11 +785,11 @@ _PAGE_HTML = r"""
           el("div", {class:"field"}, [el("div", {class:"label", text:"runninghub.workflowId"}), runninghubWorkflowId, el("div", {class:"help", text:"provider=runninghub 时使用。"})]),
         ]),
         el("div", {class:"row2"}, [
-          el("div", {class:"field"}, [el("div", {class:"label", text:"apiWorkflowPath"}), apiPath, el("div", {class:"help", text:"本地工作流 JSON 路径（本地执行时使用）。"})]),
+          el("div", {class:"field"}, [el("div", {class:"label", text:"apiWorkflowPath"}), apiPath, el("div", {class:"help", text:"降级兜底用：当 /prompt_workflow 返回 404（插件缺失/工作流不存在）时，读取该 JSON（需为 ComfyUI API Format）并改走 /prompt 执行。"})]),
           el("div", {class:"field"}, [el("div", {class:"label", text:"comfyuiBaseUrl（可选）"}), baseUrl, el("div", {class:"help", text:"不填则用 .env 的 COMFYUI_BASE_URL。"})]),
         ]),
         el("div", {class:"field bitableOnly"}, [el("div", {class:"label", text:"table"}), tableKey, el("div", {class:"help", text:"绑定的表格 key（对应 tables）。"} )]),
-        el("div", {class:"field"}, [el("div", {class:"label", text:"defaults"}), defaults, el("div", {class:"help", text:"默认参数：当用户没传值时使用。"})]),
+        el("div", {class:"field"}, [el("div", {class:"label", text:"defaults"}), defaults, el("div", {class:"help", text:"默认参数（兜底值）：当表格/命令没有传入该参数时使用；命令参数会覆盖 defaults。常见用途：save_prefix_1/save_prefix_2（若绑定了 record 且用户没传，会自动拼上 record_id 以避免重名）。"})]),
         el("div", {class:"field bitableOnly"}, [el("div", {class:"label", text:"recordFields"}), recordFields, el("div", {class:"help", text:"从表格读取：参数名 -> 表格列名。"})]),
         el("div", {class:"field bitableOnly"}, [el("div", {class:"label", text:"writeBackFields"}), writeBackFields, el("div", {class:"help", text:"写回表格：字段 key -> 表格列名。"})]),
         el("div", {class:"field"}, [el("div", {class:"label", text:"params"}), params]),
