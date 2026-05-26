@@ -121,7 +121,41 @@ def _collect_mention_ids(msg: Any, content: dict[str, Any]) -> list[str]:
     if isinstance(ms, list):
         for it in ms:
             try:
+                if isinstance(it, str) and it.strip():
+                    out.append(it.strip())
+                    continue
+                if isinstance(it, dict):
+                    id0 = it.get("id")
+                    if isinstance(id0, str) and id0.strip():
+                        out.append(id0.strip())
+                    elif isinstance(id0, dict):
+                        for k in ("open_id", "openId", "user_id", "userId", "union_id", "unionId"):
+                            v = id0.get(k)
+                            if isinstance(v, str) and v.strip():
+                                out.append(v.strip())
+                    for k in ("open_id", "openId", "user_id", "userId", "union_id", "unionId"):
+                        v = it.get(k)
+                        if isinstance(v, str) and v.strip():
+                            out.append(v.strip())
+                    continue
+
+                to_dict = getattr(it, "to_dict", None)
+                if callable(to_dict):
+                    d = to_dict()
+                    if isinstance(d, dict):
+                        id0 = d.get("id")
+                        if isinstance(id0, str) and id0.strip():
+                            out.append(id0.strip())
+                        elif isinstance(id0, dict):
+                            for k in ("open_id", "openId", "user_id", "userId", "union_id", "unionId"):
+                                v = id0.get(k)
+                                if isinstance(v, str) and v.strip():
+                                    out.append(v.strip())
+
                 mid = getattr(it, "id", None)
+                if isinstance(mid, str) and mid.strip():
+                    out.append(mid.strip())
+                    continue
                 v = getattr(mid, "open_id", None) if mid else None
                 if isinstance(v, str) and v.strip():
                     out.append(v.strip())
@@ -129,6 +163,10 @@ def _collect_mention_ids(msg: Any, content: dict[str, Any]) -> list[str]:
                 v2 = getattr(mid, "user_id", None) if mid else None
                 if isinstance(v2, str) and v2.strip():
                     out.append(v2.strip())
+                    continue
+                v3 = getattr(mid, "union_id", None) if mid else None
+                if isinstance(v3, str) and v3.strip():
+                    out.append(v3.strip())
             except Exception:
                 continue
 
@@ -139,15 +177,18 @@ def _collect_mention_ids(msg: Any, content: dict[str, Any]) -> list[str]:
                 continue
             id0 = it.get("id")
             if isinstance(id0, dict):
-                for k in ("open_id", "openId", "user_id", "userId"):
+                for k in ("open_id", "openId", "user_id", "userId", "union_id", "unionId"):
                     v = id0.get(k)
                     if isinstance(v, str) and v.strip():
                         out.append(v.strip())
-            for k in ("open_id", "openId", "user_id", "userId"):
+            elif isinstance(id0, str) and id0.strip():
+                out.append(id0.strip())
+            for k in ("open_id", "openId", "user_id", "userId", "union_id", "unionId"):
                 v = it.get(k)
                 if isinstance(v, str) and v.strip():
                     out.append(v.strip())
     return out
+
 
 
 def _is_group_chat(msg: Any) -> bool:
@@ -354,11 +395,35 @@ def do_p2_im_message_receive_v1_factory(ctx: AppContext):
         text = str(content.get("text") or "")
         if not text:
             text = _extract_text_from_message_content(msg.content)
-        if text and not _should_accept_command_in_message(ctx, msg=msg, content=content, text=text):
-            return
         cmd = parse_message_text(text)
         if not cmd:
             return
+        if text and not _should_accept_command_in_message(ctx, msg=msg, content=content, text=text):
+            try:
+                bot_open_id = _get_bot_open_id(ctx)
+                ids = _collect_mention_ids(msg, content)
+                logging.info(
+                    "ignored command in group chat (chat_id=%s user=%s cmd=%s). bot_open_id=%s mention_ids=%s text=%s",
+                    str(chat_id or ""),
+                    str(user_open_id or ""),
+                    str(getattr(cmd, "name", "") or ""),
+                    str(bot_open_id or ""),
+                    ids,
+                    (text or "")[:120],
+                )
+            except Exception:
+                pass
+            return
+        try:
+            logging.info(
+                "accepted command (chat_id=%s user=%s cmd=%s args=%s)",
+                str(chat_id or ""),
+                str(user_open_id or ""),
+                str(getattr(cmd, "name", "") or ""),
+                getattr(cmd, "args", None),
+            )
+        except Exception:
+            pass
         trig = TriggerContext(chat_id=chat_id, user_open_id=user_open_id, source="im.message.receive_v1")
         threading.Thread(target=dispatch_in_thread, kwargs={"ctx": ctx, "name": cmd.name, "args": cmd.args, "trigger": trig}, daemon=True).start()
 

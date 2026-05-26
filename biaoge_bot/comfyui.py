@@ -38,21 +38,59 @@ class ComfyUIClient:
         extra_data: dict[str, Any] | None = None,
         client_id: str = "biaoge-bot",
     ) -> ComfyQueued:
-        payload: dict[str, Any] = {"workflowName": workflow_name, "client_id": client_id}
-        if node_info_list is not None:
-            payload["nodeInfoList"] = node_info_list
-        if extra_data is not None:
-            payload["extra_data"] = extra_data
+        def normalize_node_info_list(items: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
+            if items is None:
+                return None
+            out: list[dict[str, Any]] = []
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                node_id = it.get("nodeId")
+                if isinstance(node_id, str) and node_id.strip().isdigit():
+                    node_id = int(node_id.strip())
+                field_name = it.get("fieldName")
+                field_value = it.get("fieldValue")
+                out.append({"nodeId": node_id, "fieldName": field_name, "fieldValue": field_value})
+            return out
 
+        node_list = normalize_node_info_list(node_info_list)
+
+        payloads: list[dict[str, Any]] = []
+        p1: dict[str, Any] = {"workflowName": workflow_name, "client_id": client_id}
+        if node_list is not None:
+            p1["nodeInfoList"] = node_list
+        if extra_data is not None:
+            p1["extra_data"] = extra_data
+        payloads.append(p1)
+
+        p2: dict[str, Any] = {"workflow_name": workflow_name, "client_id": client_id}
+        if node_list is not None:
+            p2["node_info_list"] = node_list
+        if extra_data is not None:
+            p2["extra_data"] = extra_data
+        payloads.append(p2)
+
+        p3: dict[str, Any] = {"workflowName": workflow_name, "clientId": client_id}
+        if node_list is not None:
+            p3["nodeInfoList"] = node_list
+        if extra_data is not None:
+            p3["extraData"] = extra_data
+        payloads.append(p3)
+
+        last: httpx.Response | None = None
         async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.post(
-                f"{self._base_url}/prompt_workflow",
-                content=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-                headers={"Content-Type": "application/json; charset=utf-8"},
-            )
-            r.raise_for_status()
-            data = r.json()
-            return ComfyQueued(prompt_id=data.get("prompt_id"), raw=data)
+            for payload in payloads:
+                r = await client.post(f"{self._base_url}/prompt_workflow", json=payload)
+                last = r
+                if 200 <= r.status_code < 300:
+                    data = r.json()
+                    return ComfyQueued(prompt_id=data.get("prompt_id"), raw=data)
+                if r.status_code not in (400, 404, 422):
+                    r.raise_for_status()
+        if last is None:
+            raise RuntimeError("queue_workflow failed: no response")
+        last.raise_for_status()
+        raise RuntimeError("queue_workflow failed")
 
     async def upload_image(
         self,

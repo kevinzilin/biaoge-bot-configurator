@@ -291,6 +291,20 @@ def _runninghub_node_file_value(file_name: str) -> str:
     return s.lstrip("/")
 
 
+def _apply_param_aliases(wf: WorkflowSpec, values: dict[str, Any]) -> dict[str, Any]:
+    out = dict(values or {})
+    aliases = (
+        ("image", "images"),
+        ("images", "image"),
+        ("img", "image"),
+        ("imgs", "images"),
+    )
+    for src, dst in aliases:
+        if src in out and dst not in out and dst in (wf.params or {}):
+            out[dst] = out.get(src)
+    return out
+
+
 async def _download_attachments(
     ctx: AppContext,
     *,
@@ -468,8 +482,15 @@ async def _resolve_file_refs_in_params(
         nth = max(1, nth)
         items = await im_cli.list_chat_messages(chat_id=cid, page_size=20)
         found: list[dict[str, Any]] = []
+        msg_type_counts: dict[str, int] = {}
+        scanned = 0
         for it0 in items:
+            scanned += 1
             body = it0.get("body") if isinstance(it0.get("body"), dict) else {}
+            mt = body.get("msg_type") if isinstance(body.get("msg_type"), str) else it0.get("msg_type")
+            mt0 = str(mt or "").strip().lower() or "unknown"
+            msg_type_counts[mt0] = int(msg_type_counts.get(mt0) or 0) + 1
+            mid = it0.get("message_id") if isinstance(it0.get("message_id"), str) else None
             content_raw = body.get("content") if isinstance(body.get("content"), str) else it0.get("content")
             if not isinstance(content_raw, str) or not content_raw:
                 continue
@@ -477,17 +498,40 @@ async def _resolve_file_refs_in_params(
                 obj = json.loads(content_raw)
             except Exception:
                 continue
-            img_vals = _collect_values_by_key(obj, {"image_key", "imageKey"}, limit=5)
-            for v0 in img_vals:
-                if isinstance(v0, str) and v0.strip():
-                    found.append({"kind": "image", "key": v0.strip()})
-            file_vals = _collect_values_by_key(obj, {"file_key", "fileKey"}, limit=5)
-            for v1 in file_vals:
-                if isinstance(v1, str) and v1.strip():
-                    found.append({"kind": "file", "key": v1.strip()})
+            if mt0 == "image":
+                img_vals = _collect_values_by_key(obj, {"image_key", "imageKey"}, limit=5)
+                for v0 in img_vals:
+                    if isinstance(v0, str) and v0.strip():
+                        found.append({"kind": "image", "key": v0.strip(), "message_id": mid})
+            elif mt0 == "file":
+                file_vals = _collect_values_by_key(obj, {"file_key", "fileKey"}, limit=5)
+                for v1 in file_vals:
+                    if isinstance(v1, str) and v1.strip():
+                        found.append({"kind": "file", "key": v1.strip(), "message_id": mid})
+            else:
+                img_vals = _collect_values_by_key(obj, {"image_key", "imageKey"}, limit=5)
+                for v0 in img_vals:
+                    if isinstance(v0, str) and v0.strip():
+                        found.append({"kind": "image", "key": v0.strip(), "message_id": mid})
+                file_vals = _collect_values_by_key(obj, {"file_key", "fileKey"}, limit=5)
+                for v1 in file_vals:
+                    if isinstance(v1, str) and v1.strip():
+                        found.append({"kind": "file", "key": v1.strip(), "message_id": mid})
             if len(found) >= nth:
                 break
         if not found or nth > len(found):
+            try:
+                logging.warning(
+                    "msg:last not found (chat_id=%s user=%s selector=%s). fetched=%d scanned=%d types=%s",
+                    str(trigger.chat_id or ""),
+                    str(trigger.user_open_id or ""),
+                    sel0,
+                    len(items),
+                    scanned,
+                    msg_type_counts,
+                )
+            except Exception:
+                pass
             return None
         return found[nth - 1]
 
@@ -508,19 +552,20 @@ async def _resolve_file_refs_in_params(
                     raise RuntimeError(f"unsupported msg ref: {v}")
                 info = await _pick_msg_attachment(sel or "last")
                 if not info:
-                    raise RuntimeError("no recent attachment found for @msg:last (please send an image/file in this chat first; if the bot cannot receive non-@ messages in group chats, add @bot when sending the attachment, or use /api/upload; if the bot cannot see the attachment event, grant it message read permission so it can fetch recent messages; note: history fetch reads recent messages only)")
+                    raise RuntimeError("no recent attachment found for @msg:last (1) please send an image/file in this chat first; (2) if the bot cannot receive non-@ messages in group chats, add @bot when sending the attachment; (3) if the bot cannot see the attachment event, grant it message read permission; (4) fallback only scans recent messages; see console 'msg:last not found ... types=...' for what the bot can see)")
                 akey = str(info.get("key") or "").strip()
                 akind = str(info.get("kind") or "").strip().lower()
                 fname = str(info.get("file_name") or "").strip()
+                amid = str(info.get("message_id") or "").strip() or None
                 ext = Path(fname).suffix if fname else (".png" if akind == "image" else ".bin")
                 base_dir = str(ctx.settings.bitable_download_dir or "").strip() or os.getcwd()
                 tmp_dir = os.path.join(base_dir, "_im_attachments")
                 os.makedirs(tmp_dir, exist_ok=True)
                 tmp_path = os.path.join(tmp_dir, f"im_{akey[:12]}{ext}")
                 if akind == "image":
-                    await im_cli.download_image(image_key=akey, save_path=tmp_path)
+                    await im_cli.download_image(image_key=akey, save_path=tmp_path, message_id=amid)
                 else:
-                    await im_cli.download_file(file_key=akey, save_path=tmp_path)
+                    await im_cli.download_file(file_key=akey, save_path=tmp_path, message_id=amid)
                 try:
                     out[k] = await _upload_local_file_for_provider(
                         provider=provider,
@@ -560,19 +605,20 @@ async def _resolve_file_refs_in_params(
                     raise RuntimeError(f"unsupported msg ref: {it}")
                 info = await _pick_msg_attachment(sel or "last")
                 if not info:
-                    raise RuntimeError("no recent attachment found for @msg:last (please send an image/file in this chat first; if the bot cannot receive non-@ messages in group chats, add @bot when sending the attachment, or use /api/upload; if the bot cannot see the attachment event, grant it message read permission so it can fetch recent messages; note: history fetch reads recent messages only)")
+                    raise RuntimeError("no recent attachment found for @msg:last (1) please send an image/file in this chat first; (2) if the bot cannot receive non-@ messages in group chats, add @bot when sending the attachment; (3) if the bot cannot see the attachment event, grant it message read permission; (4) fallback only scans recent messages; see console 'msg:last not found ... types=...' for what the bot can see)")
                 akey = str(info.get("key") or "").strip()
                 akind = str(info.get("kind") or "").strip().lower()
                 fname = str(info.get("file_name") or "").strip()
+                amid = str(info.get("message_id") or "").strip() or None
                 ext = Path(fname).suffix if fname else (".png" if akind == "image" else ".bin")
                 base_dir = str(ctx.settings.bitable_download_dir or "").strip() or os.getcwd()
                 tmp_dir = os.path.join(base_dir, "_im_attachments")
                 os.makedirs(tmp_dir, exist_ok=True)
                 tmp_path = os.path.join(tmp_dir, f"im_{akey[:12]}{ext}")
                 if akind == "image":
-                    await im_cli.download_image(image_key=akey, save_path=tmp_path)
+                    await im_cli.download_image(image_key=akey, save_path=tmp_path, message_id=amid)
                 else:
-                    await im_cli.download_file(file_key=akey, save_path=tmp_path)
+                    await im_cli.download_file(file_key=akey, save_path=tmp_path, message_id=amid)
                 try:
                     resolved_list.append(
                         await _upload_local_file_for_provider(
@@ -973,6 +1019,7 @@ async def run_workflow(
     )
 
     merged.update(params)
+    merged = _apply_param_aliases(wf, merged)
 
     temp_files: list[str] = []
     base_download_dir = (ctx.settings.bitable_download_dir or "").strip()
@@ -1051,35 +1098,58 @@ async def run_workflow(
                 except Exception:
                     pass
     except httpx.HTTPStatusError as e:
-        if provider == "runninghub":
-            err_msg = f"HTTPError {e.response.status_code if e.response else 'unknown'}: {e}"
-        elif e.response is not None and e.response.status_code == 404:
-            if not wf.api_workflow_path:
-                err_msg = f"WorkflowPrompt 返回 404（可能插件未安装，或 workflowName [{wf.workflow_name}] 在该 ComfyUI 上不存在），且该 workflow 未配置 apiWorkflowPath"
-            else:
+        status = e.response.status_code if e.response else None
+        body_text = ""
+        if e.response is not None:
+            try:
+                ct = str(e.response.headers.get("content-type") or "").lower()
+                if "application/json" in ct:
+                    body_text = json.dumps(e.response.json(), ensure_ascii=False)
+                else:
+                    body_text = e.response.text
+            except Exception:
                 try:
-                    prompt = json.loads(Path(wf.api_workflow_path).read_text(encoding="utf-8"))
-                    if isinstance(prompt, dict):
-                        for it in node_info_list:
-                            node_id = str(it.get("nodeId") or "")
-                            field_name = str(it.get("fieldName") or "")
-                            if not node_id or not field_name:
-                                continue
-                            node = prompt.get(node_id)
-                            if not isinstance(node, dict):
-                                continue
-                            inputs = node.get("inputs")
-                            if not isinstance(inputs, dict):
-                                continue
-                            inputs[field_name] = it.get("fieldValue")
-                    if provider != "runninghub":
+                    body_text = e.response.text
+                except Exception:
+                    body_text = ""
+        body_short = body_text.strip()
+        if len(body_short) > 800:
+            body_short = body_short[:800] + "..."
+        if provider == "runninghub":
+            err_msg = f"HTTPError {status if status is not None else 'unknown'}: {e}"
+        else:
+            if status in (400, 404, 422):
+                if not wf.api_workflow_path:
+                    err_msg = (
+                        f"WorkflowPrompt 返回 {status}（可能插件未安装/参数不兼容/工作流不存在），且该 workflow 未配置 apiWorkflowPath"
+                        + (f"\nresponse={body_short}" if body_short else "")
+                    )
+                else:
+                    try:
+                        prompt = json.loads(Path(wf.api_workflow_path).read_text(encoding="utf-8"))
+                        if isinstance(prompt, dict):
+                            for it in node_info_list:
+                                node_id = str(it.get("nodeId") or "")
+                                field_name = str(it.get("fieldName") or "")
+                                if not node_id or not field_name:
+                                    continue
+                                node = prompt.get(node_id)
+                                if not isinstance(node, dict):
+                                    continue
+                                inputs = node.get("inputs")
+                                if not isinstance(inputs, dict):
+                                    continue
+                                inputs[field_name] = it.get("fieldValue")
                         res = await comfyui_client.queue_api_prompt(prompt=prompt, extra_data=extra_data)
                         prompt_id = res.prompt_id
                         err_msg = None
-                except Exception as e2:
-                    err_msg = f"降级执行 api_workflow_path 失败: {e2}"
-        else:
-            err_msg = f"HTTPError {e.response.status_code if e.response else 'unknown'}: {e}"
+                    except Exception as e2:
+                        err_msg = (
+                            f"WorkflowPrompt 返回 {status}，已尝试降级执行 api_workflow_path 但失败: {e2}"
+                            + (f"\nresponse={body_short}" if body_short else "")
+                        )
+            else:
+                err_msg = f"HTTPError {status if status is not None else 'unknown'}: {e}" + (f"\nresponse={body_short}" if body_short else "")
     except Exception as e:
         err_msg = str(e)
 

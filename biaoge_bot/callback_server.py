@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -16,6 +18,9 @@ from .admin_config import _require_admin, register_admin
 from .comfyui import ComfyUIClient
 from .context import AppContext
 from .im import IMClient
+
+_DONE_NOTIFIED: dict[str, float] = {}
+_DONE_NOTIFIED_LOCK = asyncio.Lock()
 
 
 def _is_file_path(v: str) -> bool:
@@ -834,6 +839,17 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
         else:
             ok = True if completed is None else bool(completed)
 
+    is_final = bool(completed is True or status in ("success", "succeeded", "ok", "error", "failed", "failure"))
+    if is_final and prompt_id:
+        now = time.time()
+        async with _DONE_NOTIFIED_LOCK:
+            for k, ts in list(_DONE_NOTIFIED.items()):
+                if not k or (now - float(ts or 0.0)) > 3600:
+                    _DONE_NOTIFIED.pop(k, None)
+            if prompt_id in _DONE_NOTIFIED:
+                return {"ok": True}
+            _DONE_NOTIFIED[prompt_id] = now
+
     provider = payload.get("provider")
     provider = str(provider).strip().lower() if isinstance(provider, str) else ""
     if provider not in ("runninghub",) and prompt_id and (not isinstance(payload.get("result"), dict) or not _iter_output_items(payload)):
@@ -965,35 +981,57 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
 
     if isinstance(chat_id, str) and chat_id:
         im = IMClient(ctx.auth)
-        if record_id:
+        rid0 = str(record_id or "").strip()
+        if rid0 and not rid0.startswith("mock_rec_"):
             await im.send_text(chat_id=chat_id, text=("已完成" if ok else "失败") + f" record={record_id}")
         elif file_paths:
-            for fp in file_paths:
-                try:
-                    ext = Path(fp).suffix.lower().lstrip(".")
-                    size = os.path.getsize(fp) if fp and os.path.exists(fp) else 0
-                    if ext in {"png", "jpg", "jpeg", "webp", "gif", "bmp"} and 0 < size <= 10 * 1024 * 1024:
+            sent_any = False
+            last_send_err: str | None = None
+
+            async def _send_one_file(fp: str) -> bool:
+                nonlocal last_send_err
+                ext = Path(fp).suffix.lower().lstrip(".")
+                size = os.path.getsize(fp) if fp and os.path.exists(fp) else 0
+                if size <= 0:
+                    raise RuntimeError("file not found or empty")
+                if ext == "mp4" and size <= 30 * 1024 * 1024:
+                    try:
+                        k = await im.upload_video_message(file_path=fp, duration_ms=None)
+                        await im.send_media(chat_id=chat_id, file_key=k)
+                        return True
+                    except Exception as e:
+                        last_send_err = str(e)
+                if ext in {"png", "jpg", "jpeg", "webp", "gif", "bmp"} and size <= 10 * 1024 * 1024:
+                    try:
                         k = await im.upload_image_message(file_path=fp)
                         await im.send_image(chat_id=chat_id, image_key=k)
-                    elif 0 < size <= 30 * 1024 * 1024:
-                        k = await im.upload_file_message(file_path=fp)
-                        await im.send_file(chat_id=chat_id, file_key=k)
-                    else:
-                        if result_urls:
-                            await im.send_text(chat_id=chat_id, text="\n".join(result_urls))
-                        else:
-                            await im.send_text(chat_id=chat_id, text=("已完成" if ok else "失败") + (f" prompt={prompt_id}" if prompt_id else ""))
-                except Exception:
-                    if result_urls:
-                        try:
-                            await im.send_text(chat_id=chat_id, text="\n".join(result_urls))
-                        except Exception:
-                            pass
-                    else:
-                        try:
-                            await im.send_text(chat_id=chat_id, text=("已完成" if ok else "失败") + (f" prompt={prompt_id}" if prompt_id else ""))
-                        except Exception:
-                            pass
+                        return True
+                    except Exception as e:
+                        last_send_err = str(e)
+                if size <= 30 * 1024 * 1024:
+                    k = await im.upload_file_message(file_path=fp)
+                    await im.send_file(chat_id=chat_id, file_key=k)
+                    return True
+                raise RuntimeError("file too large to upload via im api")
+
+            for fp in file_paths:
+                try:
+                    if await _send_one_file(fp):
+                        sent_any = True
+                except Exception as e:
+                    last_send_err = str(e)
+
+            if not sent_any:
+                if result_urls:
+                    lines = list(result_urls)
+                    if last_send_err:
+                        lines.append(f"（补充：发送预览失败，原因：{last_send_err}）")
+                    await im.send_text(chat_id=chat_id, text="\n".join(lines))
+                else:
+                    text0 = ("已完成" if ok else "失败") + (f" prompt={prompt_id}" if prompt_id else "")
+                    if last_send_err:
+                        text0 = text0 + f"\n（补充：发送预览失败，原因：{last_send_err}）"
+                    await im.send_text(chat_id=chat_id, text=text0)
         elif result_urls:
             lines = [("已完成" if ok else "失败") + (f" prompt={prompt_id}" if prompt_id else "")]
             lines.extend(result_urls)
