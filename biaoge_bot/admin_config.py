@@ -63,7 +63,7 @@ def _workflow_path() -> Path:
                 pass
     except Exception:
         pass
-    return root / "config" / "workflows.loca.json"
+    return root / "config" / "workflows.local.json"
 
 
 def _is_sensitive_key(key: str) -> bool:
@@ -357,6 +357,7 @@ _PAGE_HTML = r"""
           <h2>workflows</h2>
           <button id="btnAddWorkflow" class="btnGhost">新增</button>
         </div>
+        <div id="wfPath" class="muted" style="margin:-6px 0 8px 2px; font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"></div>
         <div id="workflowList" class="sideList"></div>
       </div>
 
@@ -843,6 +844,7 @@ _PAGE_HTML = r"""
     if (!r2.ok) { setStatus("读取 workflows 失败: " + r2.status, "err"); return; }
     const wf = await r2.json();
     STATE.cfg = wf.config || {};
+    $("wfPath").textContent = "path: " + String(wf.path || "");
     if (!STATE.cfg.tables) STATE.cfg.tables = {};
     if (!STATE.cfg.workflows) STATE.cfg.workflows = {};
 
