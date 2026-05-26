@@ -401,6 +401,7 @@ async def _resolve_file_refs_in_params(
     wf: WorkflowSpec,
     params: dict[str, Any],
 ) -> dict[str, Any]:
+    im_cli = IMClient(ctx.auth)
     def is_inline_node_key(k: str) -> bool:
         return bool(_INLINE_NODE_KEY.match(str(k)))
 
@@ -455,8 +456,6 @@ async def _resolve_file_refs_in_params(
         info0 = ctx.runner.get_im_attachment(chat_id=trigger.chat_id, user_open_id=trigger.user_open_id, selector=sel0)
         if info0:
             return info0
-        if not ctx.im:
-            return None
         cid = str(trigger.chat_id or "").strip()
         if not cid:
             return None
@@ -468,7 +467,7 @@ async def _resolve_file_refs_in_params(
                 nth = 1
         nth = max(1, nth)
         try:
-            items = await ctx.im.list_chat_messages(chat_id=cid, page_size=20)
+            items = await im_cli.list_chat_messages(chat_id=cid, page_size=20)
         except Exception:
             return None
         found: list[dict[str, Any]] = []
@@ -513,8 +512,6 @@ async def _resolve_file_refs_in_params(
                 info = await _pick_msg_attachment(sel or "last")
                 if not info:
                     raise RuntimeError("no recent attachment found for @msg:last (please send an image/file in this chat first; if the bot cannot receive non-@ messages in group chats, add @bot when sending the attachment, or use /api/upload; if the bot cannot see the attachment event, grant it message read permission so it can fetch recent messages)")
-                if not ctx.im:
-                    raise RuntimeError("missing im client")
                 akey = str(info.get("key") or "").strip()
                 akind = str(info.get("kind") or "").strip().lower()
                 fname = str(info.get("file_name") or "").strip()
@@ -524,9 +521,9 @@ async def _resolve_file_refs_in_params(
                 os.makedirs(tmp_dir, exist_ok=True)
                 tmp_path = os.path.join(tmp_dir, f"im_{akey[:12]}{ext}")
                 if akind == "image":
-                    await ctx.im.download_image(image_key=akey, save_path=tmp_path)
+                    await im_cli.download_image(image_key=akey, save_path=tmp_path)
                 else:
-                    await ctx.im.download_file(file_key=akey, save_path=tmp_path)
+                    await im_cli.download_file(file_key=akey, save_path=tmp_path)
                 try:
                     out[k] = await _upload_local_file_for_provider(
                         provider=provider,
@@ -567,8 +564,6 @@ async def _resolve_file_refs_in_params(
                 info = await _pick_msg_attachment(sel or "last")
                 if not info:
                     raise RuntimeError("no recent attachment found for @msg:last (please send an image/file in this chat first; if the bot cannot receive non-@ messages in group chats, add @bot when sending the attachment, or use /api/upload; if the bot cannot see the attachment event, grant it message read permission so it can fetch recent messages)")
-                if not ctx.im:
-                    raise RuntimeError("missing im client")
                 akey = str(info.get("key") or "").strip()
                 akind = str(info.get("kind") or "").strip().lower()
                 fname = str(info.get("file_name") or "").strip()
@@ -578,9 +573,9 @@ async def _resolve_file_refs_in_params(
                 os.makedirs(tmp_dir, exist_ok=True)
                 tmp_path = os.path.join(tmp_dir, f"im_{akey[:12]}{ext}")
                 if akind == "image":
-                    await ctx.im.download_image(image_key=akey, save_path=tmp_path)
+                    await im_cli.download_image(image_key=akey, save_path=tmp_path)
                 else:
-                    await ctx.im.download_file(file_key=akey, save_path=tmp_path)
+                    await im_cli.download_file(file_key=akey, save_path=tmp_path)
                 try:
                     resolved_list.append(
                         await _upload_local_file_for_provider(
