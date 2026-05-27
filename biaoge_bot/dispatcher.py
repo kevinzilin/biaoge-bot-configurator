@@ -6,6 +6,7 @@ import json
 import os
 import re
 import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -284,6 +285,345 @@ def _collect_file_paths(value: Any) -> list[str]:
     return [str(value)]
 
 
+def _collect_display_strings(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        s = value.strip()
+        return [s] if s else []
+    if isinstance(value, (int, float, bool)):
+        return [str(value)]
+    if isinstance(value, list):
+        out: list[str] = []
+        for x in value:
+            out.extend(_collect_display_strings(x))
+        return out
+    if isinstance(value, dict):
+        for k in (
+            "text",
+            "name",
+            "title",
+            "label",
+            "display_value",
+            "displayValue",
+            "value",
+        ):
+            v = value.get(k)
+            if isinstance(v, str):
+                s = v.strip()
+                if s:
+                    return [s]
+            elif isinstance(v, (int, float, bool)):
+                return [str(v)]
+            elif isinstance(v, (list, dict)):
+                got = _collect_display_strings(v)
+                if got:
+                    return got
+        out2: list[str] = []
+        for vv in value.values():
+            out2.extend(_collect_display_strings(vv))
+        return out2
+    s2 = str(value).strip()
+    return [s2] if s2 else []
+
+
+def _normalize_bitable_value_for_param(value: Any, spec: WorkflowSpec | None, param_key: str) -> Any:
+    if not spec or not isinstance(param_key, str) or not param_key:
+        return value
+    ps = spec.params.get(param_key)
+    if not ps:
+        return value
+
+    wants_list = bool(ps.multi or any(t.index is not None for t in ps.targets))
+    type_name = str(ps.type or "str")
+
+    if not isinstance(value, (list, dict)):
+        if wants_list and value is not None and not isinstance(value, list):
+            return [value]
+        return value
+
+    items = _collect_display_strings(value)
+    if not items:
+        return [] if wants_list and isinstance(value, list) else value
+
+    if wants_list:
+        return items
+
+    if type_name == "str":
+        return "，".join([x for x in items if str(x).strip()])
+    return items[0]
+
+
+def _extract_relation_record_ids(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        for k in ("record_id", "recordId", "id"):
+            v = value.get(k)
+            if isinstance(v, str) and v.strip():
+                return [v.strip()]
+        for k in ("record_ids", "recordIds", "record_ids_list", "recordIdList"):
+            v2 = value.get(k)
+            if isinstance(v2, list):
+                out0: list[str] = []
+                for x in v2:
+                    s = str(x or "").strip()
+                    if s:
+                        out0.append(s)
+                if out0:
+                    return out0
+        return []
+    if isinstance(value, list):
+        out: list[str] = []
+        for it in value:
+            out.extend(_extract_relation_record_ids(it))
+        return out
+    return []
+
+
+def _extract_relation_display_keys(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        s = value.strip()
+        return [s] if s else []
+    if isinstance(value, list):
+        out: list[str] = []
+        for it in value:
+            out.extend(_extract_relation_display_keys(it))
+        return out
+    if isinstance(value, dict):
+        for k in ("name", "title", "text", "value", "label"):
+            v = value.get(k)
+            if isinstance(v, str) and v.strip():
+                return [v.strip()]
+        out2: list[str] = []
+        for vv in value.values():
+            out2.extend(_extract_relation_display_keys(vv))
+        return out2
+    s2 = str(value).strip()
+    return [s2] if s2 else []
+
+
+async def _search_one_record_by_field(
+    bitable: Any,
+    *,
+    field_name: str,
+    value: str,
+) -> dict[str, Any] | None:
+    fn = str(field_name or "").strip()
+    vv = str(value or "").strip()
+    if not fn or not vv:
+        return None
+    for op in ("is", "contains"):
+        try:
+            items = await bitable.search_records(
+                filter_={
+                    "conjunction": "and",
+                    "conditions": [{"field_name": fn, "operator": op, "value": [vv]}],
+                },
+                page_size=1,
+            )
+        except Exception:
+            items = []
+        if items:
+            return items[0] if isinstance(items[0], dict) else None
+    return None
+
+
+async def _resolve_relation_prompts(
+    ctx: AppContext,
+    *,
+    source_value: Any,
+    target_app_token: str | None,
+    target_table_id: str | None,
+    target_table_key: str | None,
+    target_match_field: str | None,
+    prompt_fields: list[str],
+    join_with: str,
+    max_items: int,
+    strict: bool,
+) -> list[str]:
+    bt = None
+    if isinstance(target_table_key, str) and target_table_key.strip():
+        bt = ctx.bitables.get(target_table_key.strip())
+    if bt is None:
+        at = str(target_app_token or "").strip()
+        tid = str(target_table_id or "").strip()
+        if at and tid:
+            try:
+                from .modules.bitable import BitableClient
+                from .ports import BitableConfig
+            except Exception:
+                bt = None
+            else:
+                cfg = BitableConfig(app_token=at, table_id=tid, view_id=None, fields={}, status_values={})
+                bt = BitableClient(ctx.auth, cfg, ctx.bitable_mode)
+
+    if bt is None:
+        if strict:
+            raise RuntimeError("relationPrompt 目标表未配置：请在 workflow 配置中填写 targetTableKey，或填写 targetAppToken + targetTableId")
+        return []
+
+    ids = _extract_relation_record_ids(source_value)
+    keys = _extract_relation_display_keys(source_value)
+    ids = [x for x in ids if x][: max_items]
+    keys = [x for x in keys if x][: max_items]
+
+    records: list[dict[str, Any]] = []
+    if ids:
+        for rid in ids:
+            try:
+                rec = await bt.get_record(rid)
+            except Exception:
+                rec = None
+            if isinstance(rec, dict):
+                records.append(rec)
+    elif keys and isinstance(target_match_field, str) and target_match_field.strip():
+        fn = target_match_field.strip()
+        for k in keys:
+            got = await _search_one_record_by_field(bt, field_name=fn, value=k)
+            if not got:
+                continue
+            rid = got.get("record_id")
+            if rid:
+                try:
+                    rec = await bt.get_record(str(rid))
+                except Exception:
+                    rec = None
+                if isinstance(rec, dict):
+                    records.append(rec)
+            else:
+                records.append(got)
+
+    out: list[str] = []
+    j = str(join_with if join_with is not None else "\n")
+    for rec in records:
+        fields = rec.get("fields") if isinstance(rec.get("fields"), dict) else {}
+        parts: list[str] = []
+        for fn in prompt_fields:
+            v = fields.get(fn) if fn else None
+            ss = _collect_display_strings(v)
+            if ss:
+                parts.append(ss[0])
+        s = j.join([x for x in parts if str(x).strip()]).strip()
+        if s:
+            out.append(s)
+    return out
+
+
+def _normalize_relation_field_value(value: Any) -> str:
+    items = _collect_display_strings(value)
+    if not items:
+        return ""
+    if len(items) == 1:
+        return str(items[0] or "").strip()
+    return "，".join([str(x or "").strip() for x in items if str(x or "").strip()])
+
+
+def _build_relation_prompt_from_fields(fields: dict[str, Any], prompt_fields: list[str], join_with: str) -> str:
+    if not prompt_fields:
+        return ""
+    parts: list[str] = []
+    for fn in prompt_fields:
+        v = fields.get(fn) if fn else None
+        ss = _collect_display_strings(v)
+        if ss:
+            parts.append(ss[0])
+    j = str(join_with if join_with is not None else "\n")
+    return j.join([x for x in parts if str(x).strip()]).strip()
+
+
+async def _resolve_relation_param_items(
+    ctx: AppContext,
+    *,
+    source_value: Any,
+    target_app_token: str | None,
+    target_table_id: str | None,
+    target_table_key: str | None,
+    target_match_field: str | None,
+    item_param_map: dict[str, str],
+    prompt_fields: list[str] | None,
+    join_with: str,
+    prompt_param: str | None,
+    max_items: int,
+    strict: bool,
+) -> list[dict[str, Any]]:
+    bt = None
+    if isinstance(target_table_key, str) and target_table_key.strip():
+        bt = ctx.bitables.get(target_table_key.strip())
+    if bt is None:
+        at = str(target_app_token or "").strip()
+        tid = str(target_table_id or "").strip()
+        if at and tid:
+            try:
+                from .modules.bitable import BitableClient
+                from .ports import BitableConfig
+            except Exception:
+                bt = None
+            else:
+                cfg = BitableConfig(app_token=at, table_id=tid, view_id=None, fields={}, status_values={})
+                bt = BitableClient(ctx.auth, cfg, ctx.bitable_mode)
+
+    if bt is None:
+        if strict:
+            raise RuntimeError("relationPrompt 目标表未配置：请在 workflow 配置中填写 targetTableKey，或填写 targetAppToken + targetTableId")
+        return []
+
+    ids = _extract_relation_record_ids(source_value)
+    keys = _extract_relation_display_keys(source_value)
+    ids = [x for x in ids if x][: max_items]
+    keys = [x for x in keys if x][: max_items]
+
+    records: list[dict[str, Any]] = []
+    if ids:
+        for rid in ids:
+            try:
+                rec = await bt.get_record(rid)
+            except Exception:
+                rec = None
+            if isinstance(rec, dict):
+                records.append(rec)
+    elif keys and isinstance(target_match_field, str) and target_match_field.strip():
+        fn = target_match_field.strip()
+        for k in keys:
+            got = await _search_one_record_by_field(bt, field_name=fn, value=k)
+            if not got:
+                continue
+            rid = got.get("record_id")
+            if rid:
+                try:
+                    rec = await bt.get_record(str(rid))
+                except Exception:
+                    rec = None
+                if isinstance(rec, dict):
+                    records.append(rec)
+            else:
+                records.append(got)
+
+    out: list[dict[str, Any]] = []
+    for rec in records:
+        fields = rec.get("fields") if isinstance(rec.get("fields"), dict) else {}
+        item: dict[str, Any] = {}
+        rid = rec.get("record_id")
+        if isinstance(rid, str) and rid.strip():
+            item["__relation_record_id"] = rid.strip()
+        for param_name, field_name in (item_param_map or {}).items():
+            pn = str(param_name or "").strip()
+            fn = str(field_name or "").strip()
+            if not pn or not fn:
+                continue
+            item[pn] = _normalize_relation_field_value(fields.get(fn))
+
+        pp = str(prompt_param or "").strip()
+        if pp and pp not in item and prompt_fields:
+            s = _build_relation_prompt_from_fields(fields, prompt_fields=list(prompt_fields), join_with=join_with)
+            if s:
+                item[pp] = s
+
+        if len(item) > (1 if "__relation_record_id" in item else 0):
+            out.append(item)
+    return out
 def _runninghub_node_file_value(file_name: str) -> str:
     s = str(file_name or "").strip()
     if not s:
@@ -703,6 +1043,46 @@ def _build_inline_node_info_list(params: dict[str, Any]) -> list[dict[str, Any]]
     return out
 
 
+def _map_fields_by_config(cfg: Any, values: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    fields = getattr(cfg, "fields", None) or {}
+    if not isinstance(fields, dict):
+        return out
+    for k, v in (values or {}).items():
+        col = fields.get(k)
+        if not isinstance(col, str) or not col.strip():
+            continue
+        if v is None:
+            continue
+        out[col] = v
+    return out
+
+
+async def _bitable_create_record(*, auth: Any, app_token: str, table_id: str, fields: dict[str, Any]) -> str:
+    token = await auth.tenant_token()
+    url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records"
+    async with httpx.AsyncClient(timeout=15) as client:
+        r = await client.post(url, headers={"Authorization": f"Bearer {token}"}, json={"fields": fields})
+    r.raise_for_status()
+    obj = r.json()
+    if not isinstance(obj, dict):
+        raise RuntimeError("bitable create record failed: invalid response")
+    code = obj.get("code")
+    if code not in (0, "0", None):
+        raise RuntimeError(f"bitable create record failed: {obj}")
+    data = obj.get("data") or {}
+    if not isinstance(data, dict):
+        raise RuntimeError(f"bitable create record failed: {obj}")
+    rec = data.get("record") or {}
+    if not isinstance(rec, dict):
+        raise RuntimeError(f"bitable create record failed: {obj}")
+    rid = rec.get("record_id")
+    rid = str(rid).strip() if isinstance(rid, str) and str(rid).strip() else None
+    if not rid:
+        raise RuntimeError(f"bitable create record failed: {obj}")
+    return rid
+
+
 async def _mark_status(bitable: Any, record_id: str, status_key: str) -> None:
     if not bitable.mode.write_enabled or record_id.startswith("mock_rec_"):
         return
@@ -930,11 +1310,13 @@ async def run_workflow(
     if not wf:
         err_msg = f"未找到工作流配置: {workflow_key}"
         if record_id and not record_id.startswith("mock_rec_") and bitable and table_cfg and bitable.mode.write_enabled:
+            wf_fields0 = cfg_for_wf.get("writeBackFields") if isinstance(cfg_for_wf, dict) else None
+            allow_write_error0 = True if not isinstance(wf_fields0, dict) else ("error" in wf_fields0)
             error_field = table_cfg.fields.get("error")
             status_field = table_cfg.fields.get("status")
             failed_value = table_cfg.status_values.get("failed")
             updates: dict[str, Any] = {}
-            if error_field:
+            if allow_write_error0 and error_field:
                 updates[error_field] = err_msg
             if status_field and failed_value:
                 updates[status_field] = failed_value
@@ -964,6 +1346,7 @@ async def run_workflow(
     }
 
     merged: dict[str, Any] = {}
+    relation_split_items: list[dict[str, Any]] = []
     record_fields: dict[str, Any] = {}
     use_record_fields = bool(
         record_id
@@ -976,11 +1359,118 @@ async def run_workflow(
         record_fields = _extract_record_fields(rec)
 
     raw_cfg = (ctx.config.get("workflows") or {}).get(wf.key) or {}
+    wf_write_back_fields = raw_cfg.get("writeBackFields")
+    allow_write_prompt_id = True
+    allow_write_error = True
+    if isinstance(wf_write_back_fields, dict):
+        allow_write_prompt_id = "prompt_id" in wf_write_back_fields
+        allow_write_error = "error" in wf_write_back_fields
+    run_log_table_key = raw_cfg.get("runLogTable") or raw_cfg.get("run_log_table") or raw_cfg.get("runLogTableKey") or raw_cfg.get("run_log_table_key")
+    run_log_table_key = str(run_log_table_key).strip() if isinstance(run_log_table_key, str) and str(run_log_table_key).strip() else None
+    runlog_bitable = ctx.bitables.get(run_log_table_key) if run_log_table_key else None
+    runlog_cfg = ctx.bitable_configs.get(run_log_table_key) if run_log_table_key else None
     raw_defaults = raw_cfg.get("defaults") or {}
     if isinstance(raw_defaults, dict):
         merged.update(raw_defaults)
+    split_param: str | None = None
     if use_record_fields:
         record_field_map = raw_cfg.get("recordFields") or {}
+        relation_prompt = raw_cfg.get("relationPrompt") or raw_cfg.get("relation_prompt")
+        if isinstance(relation_prompt, dict):
+            src_field = relation_prompt.get("sourceField") or relation_prompt.get("source_field")
+            src_field = str(src_field).strip() if isinstance(src_field, str) and str(src_field).strip() else None
+            prompt_param = relation_prompt.get("targetParam") or relation_prompt.get("target_param") or "prompt"
+            prompt_param = str(prompt_param).strip() if isinstance(prompt_param, str) and str(prompt_param).strip() else "prompt"
+            tgt_key = relation_prompt.get("targetTableKey") or relation_prompt.get("target_table_key")
+            tgt_key = str(tgt_key).strip() if isinstance(tgt_key, str) and str(tgt_key).strip() else None
+            tgt_app = relation_prompt.get("targetAppToken") or relation_prompt.get("target_app_token") or relation_prompt.get("app_token")
+            tgt_app = str(tgt_app).strip() if isinstance(tgt_app, str) and str(tgt_app).strip() else None
+            tgt_tid = relation_prompt.get("targetTableId") or relation_prompt.get("target_table_id") or relation_prompt.get("table_id")
+            tgt_tid = str(tgt_tid).strip() if isinstance(tgt_tid, str) and str(tgt_tid).strip() else None
+            tgt_match = relation_prompt.get("targetMatchField") or relation_prompt.get("target_match_field")
+            tgt_match = str(tgt_match).strip() if isinstance(tgt_match, str) and str(tgt_match).strip() else None
+            ipm_raw = relation_prompt.get("itemParamMap") or relation_prompt.get("item_param_map") or relation_prompt.get("item_params") or {}
+            item_param_map: dict[str, str] = {}
+            if isinstance(ipm_raw, dict):
+                for k, v in ipm_raw.items():
+                    kk = str(k or "").strip()
+                    vv = str(v or "").strip()
+                    if kk and vv:
+                        item_param_map[kk] = vv
+            pf = relation_prompt.get("promptFields") or relation_prompt.get("prompt_fields") or []
+            prompt_fields: list[str] = []
+            if isinstance(pf, list):
+                for x in pf:
+                    if isinstance(x, str) and x.strip():
+                        prompt_fields.append(x.strip())
+            elif isinstance(pf, str) and pf.strip():
+                prompt_fields = [pf.strip()]
+            join_with = relation_prompt.get("joinWith") or relation_prompt.get("join_with") or "\n"
+            join_with = str(join_with) if isinstance(join_with, str) else "\n"
+            max_items = relation_prompt.get("maxItems") or relation_prompt.get("max_items") or 20
+            max_items = int(max_items) if isinstance(max_items, int) else (int(str(max_items)) if str(max_items).strip().isdigit() else 20)
+            max_items = max(1, min(100, max_items))
+            enable_split = relation_prompt.get("split")
+            enable_split = True if enable_split is None else bool(enable_split)
+            strict = relation_prompt.get("strict")
+            strict = True if strict is None else bool(strict)
+            enable_item_param_map = relation_prompt.get("enableItemParamMap") if isinstance(relation_prompt.get("enableItemParamMap"), bool) else relation_prompt.get("enable_item_param_map")
+            enable_item_param_map = True if enable_item_param_map is None else bool(enable_item_param_map)
+            enable_prompt_fields = relation_prompt.get("enablePromptFields") if isinstance(relation_prompt.get("enablePromptFields"), bool) else relation_prompt.get("enable_prompt_fields")
+            enable_prompt_fields = True if enable_prompt_fields is None else bool(enable_prompt_fields)
+            has_item_targets = enable_item_param_map and bool(item_param_map) and any((k in wf.params) for k in item_param_map.keys())
+            if src_field and has_item_targets:
+                src_val = record_fields.get(src_field)
+                related_items = await _resolve_relation_param_items(
+                    ctx,
+                    source_value=src_val,
+                    target_app_token=tgt_app,
+                    target_table_id=tgt_tid,
+                    target_table_key=tgt_key,
+                    target_match_field=tgt_match,
+                    item_param_map=item_param_map,
+                    prompt_fields=prompt_fields if (enable_prompt_fields and prompt_fields) else None,
+                    join_with=join_with,
+                    prompt_param=prompt_param,
+                    max_items=max_items,
+                    strict=strict,
+                )
+                if not related_items:
+                    if strict:
+                        raise RuntimeError(
+                            "relationPrompt 未匹配到任何关联记录：请检查表A的选择值/record_id 是否能在表B中找到，以及 itemParamMap 的字段名是否存在。"
+                        )
+                else:
+                    if enable_split:
+                        relation_split_items = related_items
+                        split_param = split_param or prompt_param
+                    else:
+                        merged.update(related_items[0])
+            elif src_field and enable_prompt_fields and prompt_fields:
+                src_val = record_fields.get(src_field)
+                related_prompts = await _resolve_relation_prompts(
+                    ctx,
+                    source_value=src_val,
+                    target_app_token=tgt_app,
+                    target_table_id=tgt_tid,
+                    target_table_key=tgt_key,
+                    target_match_field=tgt_match,
+                    prompt_fields=prompt_fields,
+                    join_with=join_with,
+                    max_items=max_items,
+                    strict=strict,
+                )
+                if not related_prompts:
+                    if strict:
+                        raise RuntimeError(
+                            "relationPrompt 未匹配到任何关联提示词：请检查表A的“选择屏数”值是否能在表B的匹配列中找到（例如匹配列=屏类型），以及表B是否存在要拼接的字段（通用总控提示词/专用生图提示词）。"
+                        )
+                else:
+                    merged[prompt_param] = related_prompts
+                    if enable_split:
+                        split_param = split_param or prompt_param
+            elif src_field and enable_item_param_map and item_param_map and not has_item_targets and strict and not (enable_prompt_fields and prompt_fields):
+                raise RuntimeError("relationPrompt 配置了 itemParamMap，但工作流 params 里没有对应的参数映射：请先在 params 中新增这些参数并配置 targets，或改用 promptFields 拼接。")
         for param_key in wf.params.keys():
             field_name = record_field_map.get(param_key) or param_key
             if field_name in record_fields:
@@ -993,6 +1483,7 @@ async def run_workflow(
                     value=raw_val,
                 )
                 v = downloaded if downloaded else raw_val
+                v = _normalize_bitable_value_for_param(v, wf, param_key)
                 if isinstance(merged.get(param_key), list) and isinstance(v, list):
                     base = list(v)
                     default_list = list(merged.get(param_key) or [])
@@ -1021,6 +1512,18 @@ async def run_workflow(
     merged.update(params)
     merged = _apply_param_aliases(wf, merged)
 
+    if not split_param:
+        relation_prompt = raw_cfg.get("relationPrompt") or raw_cfg.get("relation_prompt")
+        if isinstance(relation_prompt, dict):
+            enable_split = relation_prompt.get("split")
+            enable_split = True if enable_split is None else bool(enable_split)
+            prompt_param = relation_prompt.get("targetParam") or relation_prompt.get("target_param") or "prompt"
+            prompt_param = str(prompt_param).strip() if isinstance(prompt_param, str) and str(prompt_param).strip() else "prompt"
+            v = merged.get(prompt_param)
+            if enable_split and isinstance(v, list) and len(v) > 1:
+                split_param = prompt_param
+    split_max = 50
+
     temp_files: list[str] = []
     base_download_dir = (ctx.settings.bitable_download_dir or "").strip()
     if base_download_dir:
@@ -1038,65 +1541,204 @@ async def run_workflow(
             except Exception:
                 continue
 
-    node_info_list = ctx.workflows.build_node_info_list(wf, merged)
-    inline_node_info_list = _build_inline_node_info_list(params)
-    if inline_node_info_list:
-        node_info_list = node_info_list + inline_node_info_list
-    extra_data = {
-        "callback_url": _pick_callback_url_for_base(ctx, comfyui_base_url),
-        "callback_context": {
-            "record_id": record_id,
-            "recordId": record_id,
-            "workflow": workflow_key,
-            "tableKey": resolved_table_key,
-            "chat_id": trigger.chat_id,
-            "user_open_id": trigger.user_open_id,
-            "source": trigger.source,
-            "appToken": app_token,
-            "tableId": table_id,
-            "writeBack": write_back and not record_id.startswith("mock_rec_") if record_id else write_back,
-            "comfyui_base_url": comfyui_base_url,
-        },
+    split_values: list[str] = []
+    split_items: list[dict[str, Any]] = relation_split_items[:split_max] if relation_split_items else []
+    if not split_items and split_param and split_param in merged and split_param not in params:
+        v0 = merged.get(split_param)
+        if isinstance(v0, list):
+            split_values = [str(x).strip() for x in v0 if str(x).strip()][:split_max]
+
+    base_cb_ctx: dict[str, Any] = {
+        "record_id": record_id,
+        "recordId": record_id,
+        "workflow": workflow_key,
+        "tableKey": resolved_table_key,
+        "chat_id": trigger.chat_id,
+        "user_open_id": trigger.user_open_id,
+        "source": trigger.source,
+        "appToken": app_token,
+        "tableId": table_id,
+        "writeBack": write_back and not record_id.startswith("mock_rec_") if record_id else write_back,
+        "comfyui_base_url": comfyui_base_url,
     }
+    split_group = None
+    if (split_values or split_items) and record_id:
+        split_group = f"{record_id}_{int(time.time() * 1000)}"
+    split_active = bool(split_values or split_items)
+    run_group = split_group
+    if not run_group and record_id:
+        run_group = f"{record_id}_{int(time.time() * 1000)}"
 
     prompt_id: str | None = None
     err_msg: str | None = None
+    prompt_ids: list[str] = []
+    prompt_parts: list[str] | None = None
+    planned_total = 1
     try:
-        if provider == "runninghub":
-            mode = str(getattr(ctx.settings, "remote_result_mode", "") or "").strip().lower()
-            webhook_url = "" if mode == "poll" else (ctx.settings.remote_callback_url or "").strip()
-            if mode != "poll" and not webhook_url:
-                raise RuntimeError("missing REMOTE_CALLBACK_URL")
-            rh = (cfg_for_wf.get("runninghub") or {}) if isinstance(cfg_for_wf, dict) else {}
-            if not isinstance(rh, dict):
-                rh = {}
-            workflow_id = str(rh.get("workflowId") or cfg_for_wf.get("workflowId") or "").strip()
-            if not workflow_id:
-                raise RuntimeError("missing runninghub workflowId")
-            created = await runninghub_client.create_task(
-                workflow_id=workflow_id,
-                node_info_list=node_info_list,
-                webhook_url=webhook_url or None,
-                add_metadata=rh.get("addMetadata"),
-                workflow=rh.get("workflow"),
-                instance_type=rh.get("instanceType"),
-                use_personal_queue=rh.get("usePersonalQueue"),
-                retain_seconds=rh.get("retainSeconds"),
-                access_password=rh.get("accessPassword"),
-            )
-            prompt_id = created.task_id
-        else:
-            prompt_id = await queue_by_workflowprompt(
-                comfyui_client,
-                wf=wf,
-                node_info_list=node_info_list,
-                extra_data=extra_data,
-            )
+        runs: list[Any] = split_items if split_items else (split_values if split_values else [None])
+        planned_total = len(runs) if runs else 1
+        if (
+            record_id
+            and not record_id.startswith("mock_rec_")
+            and getattr(ctx, "runner", None)
+            and hasattr(ctx.runner, "register_record_run")
+        ):
+            try:
+                await ctx.runner.register_record_run(record_id=record_id, table_key=resolved_table_key, workflow_key=workflow_key, planned_total=planned_total)
+            except Exception:
+                pass
+        for idx, sp in enumerate(runs):
+            run_log_record_id: str | None = None
+            run_log_submitted_at_ms: int | None = None
+            merged_one = dict(merged)
+            if isinstance(sp, dict):
+                merged_one.update(sp)
+            elif sp is not None and split_param:
+                merged_one[split_param] = sp
+
+            node_info_list = ctx.workflows.build_node_info_list(wf, merged_one)
+            inline_node_info_list = _build_inline_node_info_list(params)
+            if inline_node_info_list:
+                node_info_list = node_info_list + inline_node_info_list
+
+            cb_ctx = dict(base_cb_ctx)
+            if split_values or split_items:
+                cb_ctx["split_group"] = split_group
+                cb_ctx["split_total"] = len(runs)
+                cb_ctx["split_index"] = idx
+                cb_ctx["append_output"] = True
+                if isinstance(sp, dict) and isinstance(sp.get("__relation_record_id"), str) and str(sp.get("__relation_record_id")).strip():
+                    cb_ctx["relation_record_id"] = str(sp.get("__relation_record_id")).strip()
+            extra_data = {"callback_url": _pick_callback_url_for_base(ctx, comfyui_base_url), "callback_context": cb_ctx}
+
+            if provider == "runninghub":
+                mode = str(getattr(ctx.settings, "remote_result_mode", "") or "").strip().lower()
+                webhook_url = "" if mode == "poll" else (ctx.settings.remote_callback_url or "").strip()
+                if mode != "poll" and not webhook_url:
+                    raise RuntimeError("missing REMOTE_CALLBACK_URL")
+                rh = (cfg_for_wf.get("runninghub") or {}) if isinstance(cfg_for_wf, dict) else {}
+                if not isinstance(rh, dict):
+                    rh = {}
+                workflow_id = str(rh.get("workflowId") or cfg_for_wf.get("workflowId") or "").strip()
+                if not workflow_id:
+                    raise RuntimeError("missing runninghub workflowId")
+                created = await runninghub_client.create_task(
+                    workflow_id=workflow_id,
+                    node_info_list=node_info_list,
+                    webhook_url=webhook_url or None,
+                    add_metadata=rh.get("addMetadata"),
+                    workflow=rh.get("workflow"),
+                    instance_type=rh.get("instanceType"),
+                    use_personal_queue=rh.get("usePersonalQueue"),
+                    retain_seconds=rh.get("retainSeconds"),
+                    access_password=rh.get("accessPassword"),
+                )
+                prompt_id = created.task_id
+            else:
+                prompt_id = await queue_by_workflowprompt(
+                    comfyui_client,
+                    wf=wf,
+                    node_info_list=node_info_list,
+                    extra_data=extra_data,
+                )
+
+            if prompt_id:
+                prompt_ids.append(prompt_id)
+                if (
+                    runlog_bitable
+                    and runlog_cfg
+                    and getattr(runlog_bitable, "mode", None)
+                    and getattr(runlog_bitable.mode, "write_enabled", False)
+                    and record_id
+                    and run_group
+                ):
+                    try:
+                        run_log_submitted_at_ms = int(time.time() * 1000)
+                        raw_fields = {
+                            "source_record_id": record_id,
+                            "source_table_key": resolved_table_key,
+                            "workflow_key": workflow_key,
+                            "workflow_name": wf.workflow_name if wf else workflow_key,
+                            "run_group": run_group,
+                            "run_total": len(runs),
+                            "run_index": idx,
+                            "provider": provider,
+                            "task_id": prompt_id,
+                            "task_status": "已提交",
+                            "submitted_at": run_log_submitted_at_ms,
+                        }
+                        fields = _map_fields_by_config(runlog_cfg, raw_fields)
+                        if fields:
+                            run_log_record_id = await _bitable_create_record(auth=ctx.auth, app_token=runlog_cfg.app_token, table_id=runlog_cfg.table_id, fields=fields)
+                    except Exception:
+                        run_log_record_id = None
+                if run_log_table_key and run_log_record_id and isinstance(cb_ctx, dict):
+                    cb_ctx["runLogTableKey"] = run_log_table_key
+                    cb_ctx["runLogRecordId"] = run_log_record_id
+                    if isinstance(run_log_submitted_at_ms, int) and run_log_submitted_at_ms > 0:
+                        cb_ctx["runLogSubmittedAtMs"] = run_log_submitted_at_ms
+                if record_id and not record_id.startswith("mock_rec_") and bitable and table_cfg and bitable.mode.write_enabled:
+                    updates: dict[str, Any] = {}
+                    status_field = table_cfg.fields.get("status")
+                    running_value = table_cfg.status_values.get("running")
+                    if status_field and running_value:
+                        updates[status_field] = running_value
+                    prompt_field = table_cfg.fields.get("prompt_id")
+                    if allow_write_prompt_id and (not split_active) and prompt_field:
+                        if prompt_parts is None:
+                            cur = record_fields.get(prompt_field)
+                            cur_s = str(cur).strip() if isinstance(cur, str) else ""
+                            prompt_parts = [x.strip() for x in cur_s.splitlines() if x.strip()] if cur_s else []
+                        if prompt_id and prompt_id not in prompt_parts:
+                            prompt_parts.append(prompt_id)
+                        updates[prompt_field] = "\n".join(prompt_parts) if prompt_parts else ""
+                        record_fields[prompt_field] = updates[prompt_field]
+                    if updates:
+                        try:
+                            await bitable.update_record(record_id, updates)
+                        except Exception as e:
+                            logging.warning(
+                                "回写飞书失败(提交阶段): table=%s record=%s updates=%s err=%s",
+                                resolved_table_key,
+                                record_id,
+                                list(updates.keys()),
+                                str(e),
+                            )
+
             if prompt_id and temp_files and getattr(ctx, "runner", None) and hasattr(ctx.runner, "register_temp_files"):
                 try:
                     await ctx.runner.register_temp_files(prompt_id=prompt_id, file_paths=temp_files)
                 except Exception:
                     pass
+
+            if prompt_id and getattr(ctx, "runner", None):
+                if hasattr(ctx.runner, "register_prompt_context"):
+                    try:
+                        await ctx.runner.register_prompt_context(
+                            prompt_id=prompt_id,
+                            record_id=record_id,
+                            table_key=resolved_table_key,
+                            workflow_key=workflow_key,
+                            chat_id=trigger.chat_id,
+                            run_log_table_key=run_log_table_key,
+                            run_log_record_id=run_log_record_id,
+                            run_log_submitted_at_ms=run_log_submitted_at_ms,
+                            split_group=split_group,
+                            split_total=len(runs) if (split_values or split_items) else None,
+                            split_index=idx if (split_values or split_items) else None,
+                            append_output=True if (split_values or split_items) else None,
+                        )
+                    except Exception:
+                        pass
+                if hasattr(ctx.runner, "register_pending_remote"):
+                    try:
+                        if provider == "runninghub" or (provider != "runninghub" and not _is_local_base_url(comfyui_base_url)):
+                            await ctx.runner.register_pending_remote(prompt_id=prompt_id, provider=provider, comfyui_base_url=comfyui_base_url)
+                    except Exception:
+                        pass
+
+        if prompt_ids:
+            prompt_id = prompt_ids[-1]
     except httpx.HTTPStatusError as e:
         status = e.response.status_code if e.response else None
         body_text = ""
@@ -1153,30 +1795,21 @@ async def run_workflow(
     except Exception as e:
         err_msg = str(e)
 
-    if prompt_id and temp_files and getattr(ctx, "runner", None) and hasattr(ctx.runner, "register_temp_files"):
+    if (
+        record_id
+        and not record_id.startswith("mock_rec_")
+        and getattr(ctx, "runner", None)
+        and hasattr(ctx.runner, "finalize_record_run")
+    ):
         try:
-            await ctx.runner.register_temp_files(prompt_id=prompt_id, file_paths=temp_files)
+            await ctx.runner.finalize_record_run(
+                record_id=record_id,
+                table_key=resolved_table_key,
+                workflow_key=workflow_key,
+                submitted_total=len(prompt_ids),
+            )
         except Exception:
             pass
-
-    if prompt_id and getattr(ctx, "runner", None):
-        if hasattr(ctx.runner, "register_prompt_context"):
-            try:
-                await ctx.runner.register_prompt_context(
-                    prompt_id=prompt_id,
-                    record_id=record_id,
-                    table_key=resolved_table_key,
-                    workflow_key=workflow_key,
-                    chat_id=trigger.chat_id,
-                )
-            except Exception:
-                pass
-        if hasattr(ctx.runner, "register_pending_remote"):
-            try:
-                if provider == "runninghub" or (provider != "runninghub" and not _is_local_base_url(comfyui_base_url)):
-                    await ctx.runner.register_pending_remote(prompt_id=prompt_id, provider=provider, comfyui_base_url=comfyui_base_url)
-            except Exception:
-                pass
 
     if err_msg:
         if record_id and not record_id.startswith("mock_rec_") and bitable and table_cfg and bitable.mode.write_enabled:
@@ -1184,7 +1817,7 @@ async def run_workflow(
             status_field = table_cfg.fields.get("status")
             failed_value = table_cfg.status_values.get("failed")
             updates: dict[str, Any] = {}
-            if error_field:
+            if allow_write_error and (not split_active) and error_field:
                 updates[error_field] = err_msg
             if status_field and failed_value:
                 updates[status_field] = failed_value
@@ -1193,23 +1826,376 @@ async def run_workflow(
                     await bitable.update_record(record_id, updates)
                 except Exception:
                     pass
+        if (
+            runlog_bitable
+            and runlog_cfg
+            and getattr(runlog_bitable, "mode", None)
+            and getattr(runlog_bitable.mode, "write_enabled", False)
+            and record_id
+            and run_group
+        ):
+            try:
+                now_ms = int(time.time() * 1000)
+                raw_fields = {
+                    "source_record_id": record_id,
+                    "source_table_key": resolved_table_key,
+                    "workflow_key": workflow_key,
+                    "workflow_name": wf.workflow_name if wf else workflow_key,
+                    "run_group": run_group,
+                    "run_total": planned_total,
+                    "run_index": 0,
+                    "provider": provider,
+                    "task_id": "",
+                    "task_status": "失败",
+                    "submitted_at": now_ms,
+                    "finished_at": now_ms,
+                    "duration_sec": 0,
+                    "error_message": err_msg,
+                }
+                fields = _map_fields_by_config(runlog_cfg, raw_fields)
+                if fields:
+                    await _bitable_create_record(auth=ctx.auth, app_token=runlog_cfg.app_token, table_id=runlog_cfg.table_id, fields=fields)
+            except Exception:
+                pass
         raise RuntimeError(err_msg)
 
-    if prompt_id and record_id and not record_id.startswith("mock_rec_") and bitable and table_cfg and bitable.mode.write_enabled:
+    if (prompt_id or prompt_ids) and record_id and not record_id.startswith("mock_rec_") and bitable and table_cfg and bitable.mode.write_enabled:
         updates: dict[str, Any] = {}
         status_field = table_cfg.fields.get("status")
         running_value = table_cfg.status_values.get("running")
         if status_field and running_value:
             updates[status_field] = running_value
         prompt_field = table_cfg.fields.get("prompt_id")
-        if prompt_field:
-            updates[prompt_field] = prompt_id
+        if allow_write_prompt_id and (not split_active) and prompt_field:
+            if prompt_ids:
+                cur = record_fields.get(prompt_field)
+                cur_s = str(cur).strip() if isinstance(cur, str) else ""
+                parts = [x.strip() for x in cur_s.splitlines() if x.strip()] if cur_s else []
+                for pid in prompt_ids:
+                    if pid and pid not in parts:
+                        parts.append(pid)
+                updates[prompt_field] = "\n".join(parts) if parts else ""
+            else:
+                updates[prompt_field] = prompt_id
         if updates:
             try:
                 await bitable.update_record(record_id, updates)
-            except Exception:
-                pass
+            except Exception as e:
+                logging.warning("回写飞书失败: table=%s record=%s updates=%s err=%s", resolved_table_key, record_id, list(updates.keys()), str(e))
+                if trigger.chat_id:
+                    try:
+                        await IMClient(ctx.auth).send_text(chat_id=trigger.chat_id, text=f"回写飞书失败（所以任务状态/任务ID可能不会回填）。错误：{e}")
+                    except Exception:
+                        pass
     return prompt_id
+
+
+async def preview_workflow_runs(
+    ctx: AppContext,
+    *,
+    trigger: TriggerContext,
+    workflow_key: str,
+    record_id: str | None,
+    row: int | None,
+    view_id: str | None,
+    params: dict[str, Any],
+    table_key: str | None,
+    resolve_files: bool,
+) -> dict[str, Any]:
+    resolved_table_key = table_key or ctx.default_table_key
+    cfg_for_wf = (ctx.config.get("workflows") or {}).get(workflow_key) or {}
+    if not table_key and isinstance(cfg_for_wf, dict):
+        tk = cfg_for_wf.get("table")
+        if isinstance(tk, str) and tk:
+            resolved_table_key = tk
+
+    provider = str(cfg_for_wf.get("provider") or "comfyui").strip().lower() if isinstance(cfg_for_wf, dict) else "comfyui"
+
+    bitable = ctx.bitables.get(resolved_table_key) if resolved_table_key else None
+    table_cfg = ctx.bitable_configs.get(resolved_table_key) if resolved_table_key else None
+    app_token = table_cfg.app_token if table_cfg else None
+    table_id = table_cfg.table_id if table_cfg else None
+    write_back = bool(bitable and bitable.mode.write_enabled and table_cfg)
+
+    comfyui_base_url = ctx.settings.comfyui_base_url
+    wf = ctx.workflows.get(workflow_key)
+    if isinstance(cfg_for_wf, dict):
+        override_base = cfg_for_wf.get("comfyuiBaseUrl") or cfg_for_wf.get("comfyui_base_url") or cfg_for_wf.get("comfyui_base")
+        if isinstance(override_base, str) and override_base.strip():
+            comfyui_base_url = override_base.strip()
+    comfyui_client = ctx.comfyui if comfyui_base_url.rstrip("/") == ctx.settings.comfyui_base_url.rstrip("/") else ComfyUIClient(comfyui_base_url)
+    runninghub_client = RunningHubClient(api_key=str(ctx.settings.runninghub_api_key or "")) if provider == "runninghub" else None
+
+    if not record_id and row:
+        if not (bitable and table_cfg and bitable.mode.read_enabled):
+            raise RuntimeError(f"未找到指定记录 (row={row})")
+        resolved_view_id = view_id or table_cfg.view_id
+        page_token: str | None = None
+        offset = 0
+        while True:
+            items, page_token, has_more, _ = await bitable.list_records_page(view_id=resolved_view_id, page_size=200, page_token=page_token)
+            if not items:
+                break
+            idx = row - 1
+            if idx >= offset and idx < offset + len(items):
+                picked = items[idx - offset]
+                rid = picked.get("record_id")
+                if rid:
+                    record_id = str(rid)
+                break
+            offset += len(items)
+            if not has_more or not page_token:
+                break
+
+    if not record_id and not row:
+        if bitable and bitable.mode.read_enabled:
+            record_id = await bitable.find_next_queued_record_id()
+
+    if not record_id and bitable:
+        raise RuntimeError(f"未找到指定记录 (row={row})")
+
+    if not wf:
+        raise RuntimeError(f"未找到工作流配置: {workflow_key}")
+
+    merged: dict[str, Any] = {}
+    relation_split_items: list[dict[str, Any]] = []
+    record_fields: dict[str, Any] = {}
+    use_record_fields = bool(
+        record_id
+        and bitable
+        and bitable.mode.read_enabled
+        and (ctx.settings.bitable_mode or "").strip().lower() not in ("write", "writeonly", "wo")
+    )
+    if use_record_fields:
+        rec = await bitable.get_record(record_id)
+        record_fields = _extract_record_fields(rec)
+
+    raw_cfg = (ctx.config.get("workflows") or {}).get(wf.key) or {}
+    raw_defaults = raw_cfg.get("defaults") or {}
+    if isinstance(raw_defaults, dict):
+        merged.update(raw_defaults)
+
+    split_param: str | None = None
+    if use_record_fields:
+        record_field_map = raw_cfg.get("recordFields") or {}
+
+        relation_prompt = raw_cfg.get("relationPrompt") or raw_cfg.get("relation_prompt")
+        if isinstance(relation_prompt, dict):
+            src_field = relation_prompt.get("sourceField") or relation_prompt.get("source_field")
+            src_field = str(src_field).strip() if isinstance(src_field, str) and str(src_field).strip() else None
+            prompt_param = relation_prompt.get("targetParam") or relation_prompt.get("target_param") or "prompt"
+            prompt_param = str(prompt_param).strip() if isinstance(prompt_param, str) and str(prompt_param).strip() else "prompt"
+            tgt_key = relation_prompt.get("targetTableKey") or relation_prompt.get("target_table_key")
+            tgt_key = str(tgt_key).strip() if isinstance(tgt_key, str) and str(tgt_key).strip() else None
+            tgt_app = relation_prompt.get("targetAppToken") or relation_prompt.get("target_app_token") or relation_prompt.get("app_token")
+            tgt_app = str(tgt_app).strip() if isinstance(tgt_app, str) and str(tgt_app).strip() else None
+            tgt_tid = relation_prompt.get("targetTableId") or relation_prompt.get("target_table_id") or relation_prompt.get("table_id")
+            tgt_tid = str(tgt_tid).strip() if isinstance(tgt_tid, str) and str(tgt_tid).strip() else None
+            tgt_match = relation_prompt.get("targetMatchField") or relation_prompt.get("target_match_field")
+            tgt_match = str(tgt_match).strip() if isinstance(tgt_match, str) and str(tgt_match).strip() else None
+            ipm_raw = relation_prompt.get("itemParamMap") or relation_prompt.get("item_param_map") or relation_prompt.get("item_params") or {}
+            item_param_map: dict[str, str] = {}
+            if isinstance(ipm_raw, dict):
+                for k, v in ipm_raw.items():
+                    kk = str(k or "").strip()
+                    vv = str(v or "").strip()
+                    if kk and vv:
+                        item_param_map[kk] = vv
+            pf = relation_prompt.get("promptFields") or relation_prompt.get("prompt_fields") or []
+            prompt_fields: list[str] = []
+            if isinstance(pf, list):
+                for x in pf:
+                    if isinstance(x, str) and x.strip():
+                        prompt_fields.append(x.strip())
+            elif isinstance(pf, str) and pf.strip():
+                prompt_fields = [pf.strip()]
+            join_with = relation_prompt.get("joinWith") or relation_prompt.get("join_with") or "\n"
+            join_with = str(join_with) if isinstance(join_with, str) else "\n"
+            max_items = relation_prompt.get("maxItems") or relation_prompt.get("max_items") or 20
+            max_items = int(max_items) if isinstance(max_items, int) else (int(str(max_items)) if str(max_items).strip().isdigit() else 20)
+            max_items = max(1, min(100, max_items))
+            enable_split = relation_prompt.get("split")
+            enable_split = True if enable_split is None else bool(enable_split)
+            strict = relation_prompt.get("strict")
+            strict = True if strict is None else bool(strict)
+            enable_item_param_map = relation_prompt.get("enableItemParamMap") if isinstance(relation_prompt.get("enableItemParamMap"), bool) else relation_prompt.get("enable_item_param_map")
+            enable_item_param_map = True if enable_item_param_map is None else bool(enable_item_param_map)
+            enable_prompt_fields = relation_prompt.get("enablePromptFields") if isinstance(relation_prompt.get("enablePromptFields"), bool) else relation_prompt.get("enable_prompt_fields")
+            enable_prompt_fields = True if enable_prompt_fields is None else bool(enable_prompt_fields)
+            has_item_targets = enable_item_param_map and bool(item_param_map) and any((k in wf.params) for k in item_param_map.keys())
+            if src_field and has_item_targets:
+                src_val = record_fields.get(src_field)
+                related_items = await _resolve_relation_param_items(
+                    ctx,
+                    source_value=src_val,
+                    target_app_token=tgt_app,
+                    target_table_id=tgt_tid,
+                    target_table_key=tgt_key,
+                    target_match_field=tgt_match,
+                    item_param_map=item_param_map,
+                    prompt_fields=prompt_fields if (enable_prompt_fields and prompt_fields) else None,
+                    join_with=join_with,
+                    prompt_param=prompt_param,
+                    max_items=max_items,
+                    strict=strict,
+                )
+                if not related_items:
+                    if strict:
+                        raise RuntimeError("relationPrompt 未匹配到任何关联记录：请检查表A的选择值/record_id 是否能在表B中找到，以及 itemParamMap 的字段名是否存在。")
+                else:
+                    if enable_split:
+                        relation_split_items = related_items
+                        split_param = split_param or prompt_param
+                    else:
+                        merged.update(related_items[0])
+            elif src_field and enable_prompt_fields and prompt_fields:
+                src_val = record_fields.get(src_field)
+                related_prompts = await _resolve_relation_prompts(
+                    ctx,
+                    source_value=src_val,
+                    target_app_token=tgt_app,
+                    target_table_id=tgt_tid,
+                    target_table_key=tgt_key,
+                    target_match_field=tgt_match,
+                    prompt_fields=prompt_fields,
+                    join_with=join_with,
+                    max_items=max_items,
+                    strict=strict,
+                )
+                if not related_prompts:
+                    if strict:
+                        raise RuntimeError(
+                            "relationPrompt 未匹配到任何关联提示词：请检查表A的关联字段值是否能在表B的匹配列中找到，以及表B是否存在要拼接的字段。"
+                        )
+                else:
+                    merged[prompt_param] = related_prompts
+                    if enable_split:
+                        split_param = split_param or prompt_param
+            elif src_field and enable_item_param_map and item_param_map and not has_item_targets and strict and not (enable_prompt_fields and prompt_fields):
+                raise RuntimeError("relationPrompt 配置了 itemParamMap，但工作流 params 里没有对应的参数映射：请先在 params 中新增这些参数并配置 targets，或改用 promptFields 拼接。")
+
+        for param_key in wf.params.keys():
+            field_name = record_field_map.get(param_key) or param_key
+            if field_name not in record_fields:
+                continue
+            raw_val = record_fields.get(field_name)
+            v = raw_val
+            if resolve_files:
+                downloaded = await _download_attachments(
+                    ctx,
+                    provider=provider,
+                    comfyui=comfyui_client,
+                    runninghub=runninghub_client,
+                    value=raw_val,
+                )
+                v = downloaded if downloaded else raw_val
+            v = _normalize_bitable_value_for_param(v, wf, param_key)
+
+            if isinstance(merged.get(param_key), list) and isinstance(v, list):
+                base = list(v)
+                default_list = list(merged.get(param_key) or [])
+                if len(base) < len(default_list):
+                    base.extend(default_list[len(base):])
+                merged[param_key] = base
+            else:
+                merged[param_key] = v
+
+    if record_id:
+        if "save_prefix_1" in wf.params and "save_prefix_1" not in params:
+            merged["save_prefix_1"] = f"ComfyUI_out_1_{record_id}"
+        if "save_prefix_2" in wf.params and "save_prefix_2" not in params:
+            merged["save_prefix_2"] = f"ComfyUI_out_2_{record_id}"
+
+    if resolve_files:
+        params = await _resolve_file_refs_in_params(
+            ctx,
+            trigger=trigger,
+            provider=provider,
+            comfyui=comfyui_client,
+            runninghub=runninghub_client,
+            wf=wf,
+            params=params,
+        )
+
+    merged.update(params)
+    merged = _apply_param_aliases(wf, merged)
+
+    if not split_param:
+        relation_prompt = raw_cfg.get("relationPrompt") or raw_cfg.get("relation_prompt")
+        if isinstance(relation_prompt, dict):
+            enable_split = relation_prompt.get("split")
+            enable_split = True if enable_split is None else bool(enable_split)
+            prompt_param = relation_prompt.get("targetParam") or relation_prompt.get("target_param") or "prompt"
+            prompt_param = str(prompt_param).strip() if isinstance(prompt_param, str) and str(prompt_param).strip() else "prompt"
+            v = merged.get(prompt_param)
+            if enable_split and isinstance(v, list) and len(v) > 1:
+                split_param = prompt_param
+
+    split_max = 50
+
+    split_values: list[str] = []
+    split_items: list[dict[str, Any]] = relation_split_items[:split_max] if relation_split_items else []
+    if not split_items and split_param and split_param in merged and split_param not in params:
+        v0 = merged.get(split_param)
+        if isinstance(v0, list):
+            split_values = [str(x).strip() for x in v0 if str(x).strip()][:split_max]
+
+    base_cb_ctx: dict[str, Any] = {
+        "record_id": record_id,
+        "recordId": record_id,
+        "workflow": workflow_key,
+        "tableKey": resolved_table_key,
+        "chat_id": trigger.chat_id,
+        "user_open_id": trigger.user_open_id,
+        "source": trigger.source,
+        "appToken": app_token,
+        "tableId": table_id,
+        "writeBack": write_back and not record_id.startswith("mock_rec_") if record_id else write_back,
+        "comfyui_base_url": comfyui_base_url,
+    }
+    split_group = None
+    if (split_values or split_items) and record_id:
+        split_group = f"{record_id}_{int(time.time() * 1000)}"
+
+    runs: list[Any] = split_items if split_items else (split_values if split_values else [None])
+    out_runs: list[dict[str, Any]] = []
+    for idx, sp in enumerate(runs):
+        merged_one = dict(merged)
+        if isinstance(sp, dict):
+            merged_one.update(sp)
+        elif sp is not None and split_param:
+            merged_one[split_param] = sp
+        node_info_list = ctx.workflows.build_node_info_list(wf, merged_one)
+        inline_node_info_list = _build_inline_node_info_list(params)
+        if inline_node_info_list:
+            node_info_list = node_info_list + inline_node_info_list
+        cb_ctx = dict(base_cb_ctx)
+        if split_values or split_items:
+            cb_ctx["split_group"] = split_group
+            cb_ctx["split_total"] = len(runs)
+            cb_ctx["split_index"] = idx
+            cb_ctx["append_output"] = True
+            if isinstance(sp, dict) and isinstance(sp.get("__relation_record_id"), str) and str(sp.get("__relation_record_id")).strip():
+                cb_ctx["relation_record_id"] = str(sp.get("__relation_record_id")).strip()
+        extra_data = {"callback_url": _pick_callback_url_for_base(ctx, comfyui_base_url), "callback_context": cb_ctx}
+        out_runs.append(
+            {
+                "index": idx,
+                "param_key": split_param,
+                "param_value": sp,
+                "node_info_list": node_info_list,
+                "extra_data": extra_data,
+            }
+        )
+
+    return {
+        "workflow": workflow_key,
+        "table": resolved_table_key,
+        "record_id": record_id,
+        "provider": provider,
+        "comfyui_base_url": comfyui_base_url,
+        "runs": out_runs,
+    }
 
 
 async def dispatch(ctx: AppContext, *, name: str, args: dict[str, Any], trigger: TriggerContext) -> None:

@@ -315,6 +315,26 @@ _PAGE_HTML = r"""
     .form { display: grid; gap: 12px; }
     .field { display: grid; gap: 6px; }
     .label { font-size: 12px; color: rgba(229,231,235,0.82); }
+    .subBlock {
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 14px;
+      padding: 10px;
+      background: rgba(255,255,255,0.04);
+      box-shadow: 0 8px 18px rgba(0,0,0,0.24);
+      backdrop-filter: blur(10px);
+      display: grid;
+      gap: 10px;
+    }
+    .subHeader {
+      display:flex;
+      align-items:center;
+      justify-content: space-between;
+      gap: 10px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+    }
+    .subTitle { font-size: 13px; color: rgba(229,231,235,0.92); font-weight: 650; }
+    .relBody { display:grid; gap: 10px; }
     .row2 { display:grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     @media (max-width: 980px) { .row2 { grid-template-columns: 1fr; } }
     table { border-collapse: separate; border-spacing: 0; width: 100%; max-width: 100%; overflow: hidden; border-radius: 12px; table-layout: fixed; }
@@ -324,6 +344,66 @@ _PAGE_HTML = r"""
     .kvWrap { display:grid; gap: 8px; }
     .kvActions { display:flex; gap: 10px; }
     .bitableOnly { }
+    .block {
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 16px;
+      padding: 12px;
+      background: rgba(255,255,255,0.05);
+      box-shadow: 0 10px 24px rgba(0,0,0,0.28);
+      backdrop-filter: blur(10px);
+    }
+    .blockTitle {
+      display:flex;
+      align-items:center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+    .blockTitleLeft { display:flex; align-items:center; gap: 10px; min-width: 0; }
+    .blockTitleText { font-size: 13px; color: rgba(229,231,235,0.92); font-weight: 650; white-space: nowrap; }
+    .blockTitleSub { font-size: 12px; color: rgba(163,163,163,0.95); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .paramCard { border: 1px solid rgba(255,255,255,0.14) !important; background: rgba(255,255,255,0.04) !important; }
+    .switch {
+      appearance: none;
+      -webkit-appearance: none;
+      width: 46px;
+      height: 26px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.08);
+      border: 1px solid rgba(255,255,255,0.18);
+      position: relative;
+      cursor: pointer;
+      outline: none;
+      transition: background 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+    }
+    .switch::before {
+      content: "";
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      width: 22px;
+      height: 22px;
+      border-radius: 999px;
+      background: rgba(229,231,235,0.92);
+      box-shadow: 0 6px 16px rgba(0,0,0,0.35);
+      transition: transform 0.18s ease, background 0.18s ease;
+    }
+    .switch:focus { box-shadow: 0 0 0 3px rgba(96,165,250,0.15); border-color: rgba(96,165,250,0.65); }
+    .switch:checked { background: rgba(34,197,94,0.22); border-color: rgba(34,197,94,0.55); }
+    .switch:checked::before { transform: translateX(20px); background: rgba(255,255,255,0.95); }
+    textarea {
+      padding: 8px 10px;
+      width: 100%;
+      min-width: 0;
+      color: var(--text);
+      background: rgba(255,255,255,0.06);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      outline: none;
+      resize: vertical;
+      line-height: 1.35;
+    }
+    textarea:focus { border-color: rgba(96,165,250,0.65); box-shadow: 0 0 0 3px rgba(96,165,250,0.15); }
   </style>
 </head>
 <body>
@@ -390,7 +470,21 @@ _PAGE_HTML = r"""
     cfg: {},
     selected: {type: "env", key: ""},
   };
+  const PARAM_TYPE_OPTIONS = ["str", "int", "float", "bool"];
   let CURRENT = null;
+
+  window.addEventListener("error", (ev) => {
+    try {
+      const msg = ev && ev.message ? String(ev.message) : "unknown error";
+      setStatus("页面脚本错误：" + msg, "err");
+    } catch (e) {}
+  });
+  window.addEventListener("unhandledrejection", (ev) => {
+    try {
+      const msg = ev && ev.reason ? String(ev.reason && ev.reason.message ? ev.reason.message : ev.reason) : "unknown rejection";
+      setStatus("页面请求错误：" + msg, "err");
+    } catch (e) {}
+  });
 
   function el(tag, attrs, children) {
     const node = document.createElement(tag);
@@ -404,6 +498,15 @@ _PAGE_HTML = r"""
     return node;
   }
 
+  function ensureParamTypeDatalist() {
+    let dl = document.getElementById("paramTypeDatalist");
+    if (dl) return dl;
+    dl = el("datalist", {id: "paramTypeDatalist"});
+    for (const t of PARAM_TYPE_OPTIONS) dl.appendChild(el("option", {value: t}));
+    document.body.appendChild(dl);
+    return dl;
+  }
+
   function setStatus(text, cls) {
     const el0 = $("status");
     el0.className = cls || "muted";
@@ -414,6 +517,9 @@ _PAGE_HTML = r"""
     const url = new URL(location.href);
     const q = url.searchParams.get("token");
     const t = ($("token").value || q || "").trim();
+    try {
+      if (t) localStorage.setItem("admin_token", t);
+    } catch (e) {}
     return t ? {"x-admin-token": t} : {};
   }
 
@@ -466,6 +572,47 @@ _PAGE_HTML = r"""
         const v = (inputs[1].value || "").trim();
         if (!k) continue;
         out[k] = v;
+      }
+      return out;
+    };
+    return wrap;
+  }
+
+  function listEditor(initialList, valuePlaceholder) {
+    const wrap = el("div", {class:"kvWrap"});
+    const table = el("table");
+    const tbody = el("tbody");
+    table.appendChild(tbody);
+
+    function addRow(v) {
+      const val = el("input", {type:"text", value: (v==null ? "" : String(v)), placeholder: valuePlaceholder || ""});
+      const del = el("button", {type:"button", text:"删除", class:"btnGhost"});
+      const tr = el("tr", null, [
+        el("td", null, [val]),
+        el("td", null, [del]),
+      ]);
+      del.onclick = () => tr.remove();
+      tbody.appendChild(tr);
+    }
+
+    const init = Array.isArray(initialList) ? initialList : (typeof initialList === "string" ? [initialList] : []);
+    if (init.length) {
+      for (const v of init) addRow(v);
+    } else {
+      addRow("");
+    }
+
+    const addBtn = el("button", {type:"button", text:"新增字段", class:"btnGhost"});
+    addBtn.onclick = () => addRow("");
+    wrap.appendChild(table);
+    wrap.appendChild(el("div", {class:"kvActions"}, [addBtn]));
+    wrap._getValue = () => {
+      const out = [];
+      for (const tr of Array.from(tbody.querySelectorAll("tr"))) {
+        const input = tr.querySelector("input");
+        const v = (input && input.value ? String(input.value) : "").trim();
+        if (!v) continue;
+        out.push(v);
       }
       return out;
     };
@@ -537,7 +684,7 @@ _PAGE_HTML = r"""
 
     function addParam(key, spec) {
       const orig = spec && typeof spec === "object" ? spec : {};
-      const card = el("div", {class:"card", style:"padding:12px"});
+      const card = el("div", {class:"card paramCard", style:"padding:12px"});
       const head = el("div", {class:"sectionHeader"}, [
         el("span", {class:"pill", text:"param"}),
         el("input", {type:"text", value: key || "", placeholder:"参数名(如 prompt)"}),
@@ -547,10 +694,11 @@ _PAGE_HTML = r"""
       const delBtn = head.querySelector("button");
       delBtn.onclick = () => card.remove();
 
-      const typeInput = el("input", {type:"text", value: (orig.type||""), placeholder:"type(如 str)"});
+      ensureParamTypeDatalist();
+      const typeInput = el("input", {type:"text", list:"paramTypeDatalist", value: String(orig.type || ""), placeholder:"例如：str / int / float / bool"});
       const targets = targetsEditor(orig.targets || []);
       const form = el("div", {class:"form"}, [
-        el("div", {class:"field"}, [el("div", {class:"label", text:"type"}), typeInput]),
+        el("div", {class:"field"}, [el("div", {class:"label", text:"type"}), typeInput, el("div", {class:"help", text:"可选值：str / int / float / bool。不填默认按 str 处理。"} )]),
         el("div", {class:"field"}, [el("div", {class:"label", text:"targets"}), targets, el("div", {class:"help", text:"targets 用于把参数写入工作流节点：nodeId 为节点编号，fieldName 为字段名，index 仅用于数组位置（可空）。"})]),
       ]);
       card.appendChild(head);
@@ -716,14 +864,49 @@ _PAGE_HTML = r"""
         delBtn,
       ]));
       root.appendChild(el("div", {class:"form"}, [
-        el("div", {class:"field"}, [el("div", {class:"label", text:"table key"}), keyInput, el("div", {class:"help", text:"用于在 workflows 中引用该表格。"})]),
-        el("div", {class:"row2"}, [
-          el("div", {class:"field"}, [el("div", {class:"label", text:"app_token"}), appToken, el("div", {class:"help", text:"飞书多维表格 app_token。"})]),
-          el("div", {class:"field"}, [el("div", {class:"label", text:"table_id"}), tableId, el("div", {class:"help", text:"飞书多维表格 table_id（表格 ID）。"})]),
+        el("div", {class:"block"}, [
+          el("div", {class:"blockTitle"}, [
+            el("div", {class:"blockTitleLeft"}, [
+              el("span", {class:"pill", text:"基础"}),
+              el("div", {class:"blockTitleText", text:"tableBase"}),
+              el("div", {class:"blockTitleSub", text:"表格 key / app_token / table_id / view_id"}),
+            ]),
+          ]),
+          el("div", {class:"form"}, [
+            el("div", {class:"field"}, [el("div", {class:"label", text:"table key"}), keyInput, el("div", {class:"help", text:"用于在 workflows 中引用该表格（例如 targetTableKey）。"})]),
+            el("div", {class:"row2"}, [
+              el("div", {class:"field"}, [el("div", {class:"label", text:"app_token"}), appToken, el("div", {class:"help", text:"飞书多维表格 app_token。"})]),
+              el("div", {class:"field"}, [el("div", {class:"label", text:"table_id"}), tableId, el("div", {class:"help", text:"飞书多维表格 table_id（表格 ID）。"})]),
+            ]),
+            el("div", {class:"field"}, [el("div", {class:"label", text:"view_id（可选）"}), viewId, el("div", {class:"help", text:"不填表示默认视图。"})]),
+          ]),
         ]),
-        el("div", {class:"field"}, [el("div", {class:"label", text:"view_id（可选）"}), viewId, el("div", {class:"help", text:"不填表示默认视图。"})]),
-        el("div", {class:"field"}, [el("div", {class:"label", text:"fields"}), fields, el("div", {class:"help", text:"字段映射：key 为系统字段名，value 为多维表格列名。"})]),
-        el("div", {class:"field"}, [el("div", {class:"label", text:"status_values"}), statusValues, el("div", {class:"help", text:"状态值映射：queued/running/done/failed 等内部状态 -> 表格显示值。"})]),
+        el("div", {class:"block"}, [
+          el("div", {class:"blockTitle"}, [
+            el("div", {class:"blockTitleLeft"}, [
+              el("span", {class:"pill", text:"映射"}),
+              el("div", {class:"blockTitleText", text:"fields"}),
+              el("div", {class:"blockTitleSub", text:"系统字段名 -> 多维表格列名"}),
+            ]),
+          ]),
+          el("div", {class:"form"}, [
+            fields,
+            el("div", {class:"help", text:"字段映射：key 为系统字段名，value 为多维表格列名。默认系统字段名：status（任务状态）、workflow（工作流）、output（生成结果）、error（错误信息）、prompt_id（prompt_id/任务ID）、created_time（创建时间）。"}),
+          ]),
+        ]),
+        el("div", {class:"block"}, [
+          el("div", {class:"blockTitle"}, [
+            el("div", {class:"blockTitleLeft"}, [
+              el("span", {class:"pill", text:"状态"}),
+              el("div", {class:"blockTitleText", text:"status_values"}),
+              el("div", {class:"blockTitleSub", text:"内部状态 -> 表格显示值"}),
+            ]),
+          ]),
+          el("div", {class:"form"}, [
+            statusValues,
+            el("div", {class:"help", text:"状态值映射：内部状态 -> 表格显示值。默认内部状态：queued（待处理）、running（执行中）、done（已完成）、failed（生成失败）。"}),
+          ]),
+        ]),
       ]));
 
       CURRENT = {
@@ -763,6 +946,42 @@ _PAGE_HTML = r"""
       const params = paramsEditor(orig.params || {});
       const runninghubWorkflowId = el("input", {type:"text", value: (orig.runninghub && orig.runninghub.workflowId) ? String(orig.runninghub.workflowId) : ""});
 
+      const relOrig = orig.relationPrompt || orig.relation_prompt || {};
+      const relationEnabled = el("input", {type:"checkbox", class:"switch"});
+      relationEnabled.checked = !!(relOrig && typeof relOrig === "object" && Object.keys(relOrig).length);
+      const relSourceField = el("input", {type:"text", value: String(relOrig.sourceField || relOrig.source_field || "")});
+      const relTargetParam = el("input", {type:"text", value: String(relOrig.targetParam || relOrig.target_param || "prompt")});
+      const relSplit = el("input", {type:"checkbox", class:"switch"});
+      relSplit.checked = (relOrig.split == null) ? true : !!relOrig.split;
+      const relStrict = el("input", {type:"checkbox", class:"switch"});
+      relStrict.checked = (relOrig.strict == null) ? true : !!relOrig.strict;
+      const relEnableItemParamMap = el("input", {type:"checkbox", class:"switch"});
+      relEnableItemParamMap.checked = (relOrig.enableItemParamMap == null && relOrig.enable_item_param_map == null) ? true : !!(relOrig.enableItemParamMap ?? relOrig.enable_item_param_map);
+      const relEnablePromptFields = el("input", {type:"checkbox", class:"switch"});
+      relEnablePromptFields.checked = (relOrig.enablePromptFields == null && relOrig.enable_prompt_fields == null) ? true : !!(relOrig.enablePromptFields ?? relOrig.enable_prompt_fields);
+      const relMaxItems = el("input", {type:"text", value: String(relOrig.maxItems || relOrig.max_items || "20")});
+      const relTargetTableKey = el("input", {type:"text", value: String(relOrig.targetTableKey || relOrig.target_table_key || "")});
+      const relTargetAppToken = el("input", {type:"text", value: String(relOrig.targetAppToken || relOrig.target_app_token || relOrig.app_token || "")});
+      const relTargetTableId = el("input", {type:"text", value: String(relOrig.targetTableId || relOrig.target_table_id || relOrig.table_id || "")});
+      const relTargetMatchField = el("input", {type:"text", value: String(relOrig.targetMatchField || relOrig.target_match_field || "")});
+      const relIpm = relOrig.itemParamMap || relOrig.item_param_map || relOrig.item_params || {};
+      const relItemParamMap = kvEditor(relIpm, "param(如 prompt_general)", "字段名(如 通用总控提示词)");
+      const relPf = relOrig.promptFields || relOrig.prompt_fields || [];
+      const relPromptFields = listEditor(relPf, "字段名(如 通用总控提示词)");
+      const relJoinWith = el("input", {type:"text", value: String(relOrig.joinWith || relOrig.join_with || "\\n")});
+
+      function applyRelationEnabled() {
+        const show = relationEnabled.checked;
+        for (const it of Array.from(root.querySelectorAll(".relationOnly"))) it.style.display = show ? "" : "none";
+        const showItem = show && relEnableItemParamMap.checked;
+        const showPrompt = show && relEnablePromptFields.checked;
+        for (const it of Array.from(root.querySelectorAll(".relItemBody"))) it.style.display = showItem ? "" : "none";
+        for (const it of Array.from(root.querySelectorAll(".relPromptBody"))) it.style.display = showPrompt ? "" : "none";
+      }
+      relationEnabled.onchange = () => applyRelationEnabled();
+      relEnableItemParamMap.onchange = () => applyRelationEnabled();
+      relEnablePromptFields.onchange = () => applyRelationEnabled();
+
       delBtn.onclick = () => {
         delete wfs[key];
         STATE.selected = {type:"env", key: Object.keys(STATE.env||{}).sort()[0] || ""};
@@ -789,10 +1008,105 @@ _PAGE_HTML = r"""
           el("div", {class:"field"}, [el("div", {class:"label", text:"comfyuiBaseUrl（可选）"}), baseUrl, el("div", {class:"help", text:"不填则用 .env 的 COMFYUI_BASE_URL。"})]),
         ]),
         el("div", {class:"field bitableOnly"}, [el("div", {class:"label", text:"table"}), tableKey, el("div", {class:"help", text:"绑定的表格 key（对应 tables）。"} )]),
-        el("div", {class:"field"}, [el("div", {class:"label", text:"defaults"}), defaults, el("div", {class:"help", text:"默认参数（兜底值）：当表格/命令没有传入该参数时使用；命令参数会覆盖 defaults。常见用途：save_prefix_1/save_prefix_2（若绑定了 record 且用户没传，会自动拼上 record_id 以避免重名）。"})]),
-        el("div", {class:"field bitableOnly"}, [el("div", {class:"label", text:"recordFields"}), recordFields, el("div", {class:"help", text:"从表格读取：参数名 -> 表格列名。"})]),
-        el("div", {class:"field bitableOnly"}, [el("div", {class:"label", text:"writeBackFields"}), writeBackFields, el("div", {class:"help", text:"写回表格：字段 key -> 表格列名。"})]),
-        el("div", {class:"field"}, [el("div", {class:"label", text:"params"}), params]),
+        el("div", {class:"block"}, [
+          el("div", {class:"blockTitle"}, [
+            el("div", {class:"blockTitleLeft"}, [
+              el("span", {class:"pill", text:"默认"}),
+              el("div", {class:"blockTitleText", text:"defaults"}),
+              el("div", {class:"blockTitleSub", text:"兜底参数：表格/命令没给时用；命令参数会覆盖它"}),
+            ]),
+          ]),
+          el("div", {class:"form"}, [
+            defaults,
+            el("div", {class:"help", text:"常见用途：save_prefix_1/save_prefix_2（若绑定了 record 且用户没传，会自动拼上 record_id 以避免重名）。"}),
+          ]),
+        ]),
+        el("div", {class:"block bitableOnly"}, [
+          el("div", {class:"blockTitle"}, [
+            el("div", {class:"blockTitleLeft"}, [
+              el("span", {class:"pill", text:"读取"}),
+              el("div", {class:"blockTitleText", text:"recordFields"}),
+              el("div", {class:"blockTitleSub", text:"从表A读取：参数名 -> 列名"}),
+            ]),
+          ]),
+          el("div", {class:"form"}, [
+            recordFields,
+            el("div", {class:"help", text:"例：prompt -> 提示词；images -> 产品图。"}),
+          ]),
+        ]),
+        el("div", {class:"block bitableOnly"}, [
+          el("div", {class:"blockTitle"}, [
+            el("div", {class:"blockTitleLeft"}, [
+              el("span", {class:"pill", text:"回写"}),
+              el("div", {class:"blockTitleText", text:"writeBackFields"}),
+              el("div", {class:"blockTitleSub", text:"写回表A：字段key -> 列名"}),
+            ]),
+          ]),
+          el("div", {class:"form"}, [
+            writeBackFields,
+            el("div", {class:"help", text:"例：output -> 结果图；prompt_id -> 任务ID；status -> 任务状态。"}),
+          ]),
+        ]),
+        el("div", {class:"block bitableOnly"}, [
+          el("div", {class:"blockTitle"}, [
+            el("div", {class:"blockTitleLeft"}, [
+              el("span", {class:"pill", text:"关联"}),
+              el("div", {class:"blockTitleText", text:"relationPrompt（方案B）"}),
+              el("div", {class:"blockTitleSub", text:"用表A的选择值/record_id 去表B查提示词，再拼接成最终 prompt"}),
+            ]),
+          ]),
+          el("div", {class:"form"}, [
+            el("div", {class:"field"}, [
+              el("div", {class:"label", text:"启用 relationPrompt"}),
+              relationEnabled,
+              el("div", {class:"help", text:"开启后会走跨表查询；关闭则回到 recordFields 的普通读取逻辑。"}),
+            ]),
+            el("div", {class:"row2 relationOnly"}, [
+              el("div", {class:"field"}, [el("div", {class:"label", text:"sourceField"}), relSourceField, el("div", {class:"help", text:"表A字段名（例如：选择屏数）。优先使用里面的 record_ids；没有 record_ids 才会用文字匹配。"})]),
+              el("div", {class:"field"}, [el("div", {class:"label", text:"targetParam"}), relTargetParam, el("div", {class:"help", text:"把拼接好的提示词写到哪个参数里（通常是 prompt）。"})]),
+            ]),
+            el("div", {class:"row2 relationOnly"}, [
+              el("div", {class:"field"}, [el("div", {class:"label", text:"split"}), relSplit, el("div", {class:"help", text:"勾选：关联到几条就提交几次。"})]),
+              el("div", {class:"field"}, [el("div", {class:"label", text:"strict"}), relStrict, el("div", {class:"help", text:"勾选：匹配不到表B记录时直接报错，避免悄悄用空提示词提交。"})]),
+            ]),
+            el("div", {class:"field relationOnly"}, [el("div", {class:"label", text:"maxItems"}), relMaxItems, el("div", {class:"help", text:"最多处理多少条关联（默认 20）。"})]),
+            el("div", {class:"row2 relationOnly"}, [
+              el("div", {class:"field"}, [el("div", {class:"label", text:"targetTableKey（推荐）"}), relTargetTableKey, el("div", {class:"help", text:"目标表在 tables 里的 key。填了它就不必填 app_token/table_id。"})]),
+              el("div", {class:"field"}, [el("div", {class:"label", text:"targetMatchField（可选）"}), relTargetMatchField, el("div", {class:"help", text:"当 sourceField 只有文字没有 record_ids 时，用该列做匹配（例如：类型）。"})]),
+            ]),
+            el("div", {class:"row2 relationOnly"}, [
+              el("div", {class:"field"}, [el("div", {class:"label", text:"targetAppToken（可选）"}), relTargetAppToken, el("div", {class:"help", text:"不使用 targetTableKey 时需要填（app_token）。"})]),
+              el("div", {class:"field"}, [el("div", {class:"label", text:"targetTableId（可选）"}), relTargetTableId, el("div", {class:"help", text:"不使用 targetTableKey 时需要填（table_id）。"})]),
+            ]),
+            el("div", {class:"subBlock relationOnly"}, [
+              el("div", {class:"subHeader"}, [el("div", {class:"subTitle", text:"itemParamMap（不拼接）"}), relEnableItemParamMap]),
+              el("div", {class:"relBody relItemBody"}, [
+                el("div", {class:"help", text:"每条关联记录会生成一组参数包。例：prompt_general -> 通用总控提示词。注意：这些 param 需要在下方 params 里配置 targets 才会真正写进 ComfyUI 节点。"}),
+                relItemParamMap,
+              ]),
+            ]),
+            el("div", {class:"subBlock relationOnly"}, [
+              el("div", {class:"subHeader"}, [el("div", {class:"subTitle", text:"promptFields（拼接）"}), relEnablePromptFields]),
+              el("div", {class:"relBody relPromptBody"}, [
+                el("div", {class:"help", text:"会额外生成一段“合成提示词”：按顺序取表B字段，再用 joinWith 拼接，写入 targetParam（通常是 prompt）。如果同时启用 itemParamMap，就等于：既保留独立字段，又生成合成字段。"}),
+                el("div", {class:"field"}, [el("div", {class:"label", text:"joinWith"}), relJoinWith, el("div", {class:"help", text:"拼接多个字段的连接符。填 \\n 表示换行。"})]),
+                relPromptFields,
+              ]),
+            ]),
+          ]),
+        ]),
+        el("div", {class:"block"}, [
+          el("div", {class:"blockTitle"}, [
+            el("div", {class:"blockTitleLeft"}, [
+              el("span", {class:"pill", text:"映射"}),
+              el("div", {class:"blockTitleText", text:"params"}),
+              el("div", {class:"blockTitleSub", text:"把参数写进 ComfyUI 工作流节点（nodeId/fieldName/index）"}),
+            ]),
+          ]),
+          el("div", {class:"form"}, [
+            params,
+          ]),
+        ]),
       ]));
 
       const items = root.querySelectorAll(".bitableOnly");
@@ -816,6 +1130,47 @@ _PAGE_HTML = r"""
           out.defaults = defaults._getValue();
           out.recordFields = recordFields._getValue();
           out.writeBackFields = writeBackFields._getValue();
+
+          if (relationEnabled.checked) {
+            const rp = deepCopy(relOrig && typeof relOrig === "object" ? relOrig : {});
+            const sf = (relSourceField.value || "").trim();
+            if (!sf) throw new Error("relationPrompt 启用时，sourceField 不能为空");
+            rp.sourceField = sf;
+            const tp = (relTargetParam.value || "").trim();
+            rp.targetParam = tp || "prompt";
+            rp.split = !!relSplit.checked;
+            rp.strict = !!relStrict.checked;
+            rp.enableItemParamMap = !!relEnableItemParamMap.checked;
+            rp.enablePromptFields = !!relEnablePromptFields.checked;
+            const mi = (relMaxItems.value || "").trim();
+            if (mi) {
+              const n = parseInt(mi, 10);
+              if (!isNaN(n)) rp.maxItems = n;
+            } else {
+              delete rp.maxItems;
+            }
+            const jw = (relJoinWith.value || "").trim();
+            rp.joinWith = jw ? jw.replace(/\\n/g, "\n") : "\n";
+            const ttk = (relTargetTableKey.value || "").trim();
+            if (ttk) rp.targetTableKey = ttk; else delete rp.targetTableKey;
+            const tam = (relTargetAppToken.value || "").trim();
+            if (tam) rp.targetAppToken = tam; else delete rp.targetAppToken;
+            const tti = (relTargetTableId.value || "").trim();
+            if (tti) rp.targetTableId = tti; else delete rp.targetTableId;
+            const tmf = (relTargetMatchField.value || "").trim();
+            if (tmf) rp.targetMatchField = tmf; else delete rp.targetMatchField;
+
+            const ipm = rp.enableItemParamMap ? relItemParamMap._getValue() : {};
+            const ipmKeys = Object.keys(ipm || {});
+            if (ipmKeys.length) rp.itemParamMap = ipm; else delete rp.itemParamMap;
+
+            const pf = rp.enablePromptFields ? relPromptFields._getValue() : [];
+            if (!pf.length && !ipmKeys.length) throw new Error("relationPrompt 启用时，itemParamMap 或 promptFields 至少启用一个并填写内容");
+            if (pf.length) rp.promptFields = pf; else delete rp.promptFields;
+            out.relationPrompt = rp;
+          } else {
+            delete out.relationPrompt;
+          }
           out.params = params._getValue();
 
           const rhId = (runninghubWorkflowId.value || "").trim();
@@ -828,6 +1183,7 @@ _PAGE_HTML = r"""
           STATE.selected = {type:"workflow", key:newKey};
         }
       };
+      applyRelationEnabled();
       return;
     }
   }
@@ -835,13 +1191,23 @@ _PAGE_HTML = r"""
   async function loadAll() {
     setStatus("加载中...", "muted");
     const r1 = await fetch("/admin/api/env", {headers: authHeaders()});
-    if (!r1.ok) { setStatus("读取 .env 失败: " + r1.status, "err"); return; }
+    if (!r1.ok) {
+      const hint = (r1.status === 401 || r1.status === 403) ? "（请在上方输入 ADMIN_TOKEN，或 URL 加 ?token=... ）" : "";
+      setStatus("读取 .env 失败: " + r1.status + hint, "err");
+      if (r1.status === 401 || r1.status === 403) $("token").focus();
+      return;
+    }
     const env = await r1.json();
     STATE.env = env.values || {};
     STATE.envMeta = env.meta || {};
 
     const r2 = await fetch("/admin/api/workflows", {headers: authHeaders()});
-    if (!r2.ok) { setStatus("读取 workflows 失败: " + r2.status, "err"); return; }
+    if (!r2.ok) {
+      const hint = (r2.status === 401 || r2.status === 403) ? "（请在上方输入 ADMIN_TOKEN，或 URL 加 ?token=... ）" : "";
+      setStatus("读取 workflows 失败: " + r2.status + hint, "err");
+      if (r2.status === 401 || r2.status === 403) $("token").focus();
+      return;
+    }
     const wf = await r2.json();
     STATE.cfg = wf.config || {};
     $("wfPath").textContent = "path: " + String(wf.path || "");
@@ -924,7 +1290,20 @@ _PAGE_HTML = r"""
   };
 
   const url = new URL(location.href);
-  if (url.searchParams.get("token")) $("token").value = url.searchParams.get("token");
+  const q = url.searchParams.get("token");
+  if (q) $("token").value = q;
+  else {
+    try {
+      const saved = String(localStorage.getItem("admin_token") || "");
+      if (saved.trim()) $("token").value = saved.trim();
+    } catch (e) {}
+  }
+  $("token").addEventListener("change", () => {
+    const v = String($("token").value || "").trim();
+    try {
+      if (v) localStorage.setItem("admin_token", v);
+    } catch (e) {}
+  });
   loadAll();
 </script>
 </body>
@@ -935,7 +1314,13 @@ _PAGE_HTML = r"""
 def register_admin(app: FastAPI, ctx: AppContext) -> None:
     @app.get("/admin/config", dependencies=[Depends(_require_admin)])
     async def admin_config_page() -> HTMLResponse:
-        return HTMLResponse(_PAGE_HTML)
+        return HTMLResponse(
+            _PAGE_HTML,
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+            },
+        )
 
     @app.get("/admin/api/env", dependencies=[Depends(_require_admin)])
     async def admin_get_env() -> dict[str, Any]:

@@ -21,6 +21,12 @@ from .im import IMClient
 
 _DONE_NOTIFIED: dict[str, float] = {}
 _DONE_NOTIFIED_LOCK = asyncio.Lock()
+_FIELDS_META_CACHE: dict[str, tuple[float, dict[str, dict[str, Any]]]] = {}
+_FIELDS_META_CACHE_LOCK = asyncio.Lock()
+_SPLIT_PROGRESS: dict[tuple[str, str, str], dict[str, Any]] = {}
+_SPLIT_PROGRESS_LOCK = asyncio.Lock()
+_SPLIT_SUMMARY_NOTIFIED: dict[tuple[str, str, str], float] = {}
+_SPLIT_SUMMARY_NOTIFIED_LOCK = asyncio.Lock()
 
 
 def _is_file_path(v: str) -> bool:
@@ -63,6 +69,55 @@ def _collect_strings(value: Any) -> list[str]:
             out.extend(_collect_strings(x))
         return out
     return [str(value)]
+
+
+def _collect_display_strings(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        s = value.strip()
+        return [s] if s else []
+    if isinstance(value, (int, float, bool)):
+        return [str(value)]
+    if isinstance(value, list):
+        out: list[str] = []
+        for x in value:
+            out.extend(_collect_display_strings(x))
+        return out
+    if isinstance(value, dict):
+        for k in ("text", "name", "title", "label", "display_value", "displayValue", "value"):
+            v = value.get(k)
+            if isinstance(v, str):
+                s = v.strip()
+                if s:
+                    return [s]
+            elif isinstance(v, (int, float, bool)):
+                return [str(v)]
+            elif isinstance(v, (list, dict)):
+                got = _collect_display_strings(v)
+                if got:
+                    return got
+        out2: list[str] = []
+        for vv in value.values():
+            out2.extend(_collect_display_strings(vv))
+        return out2
+    s2 = str(value).strip()
+    return [s2] if s2 else []
+
+
+def _bitable_status_snapshot(ctx: AppContext) -> dict[str, Any]:
+    try:
+        mode = getattr(ctx, "bitable_mode", None)
+        mode_obj = {
+            "read_enabled": bool(getattr(mode, "read_enabled", False)),
+            "write_enabled": bool(getattr(mode, "write_enabled", False)),
+        }
+    except Exception:
+        mode_obj = {"read_enabled": False, "write_enabled": False}
+    keys = sorted([str(k) for k in (getattr(ctx, "bitables", None) or {}).keys() if k])
+    cfg_keys = sorted([str(k) for k in (getattr(ctx, "bitable_configs", None) or {}).keys() if k])
+    default_key = str(getattr(ctx, "default_table_key", "") or "")
+    return {"mode": mode_obj, "default_table_key": default_key, "bitable_keys": keys, "configured_table_keys": cfg_keys}
 
 
 def _extract_callback_context(payload: dict[str, Any]) -> dict[str, Any]:
@@ -284,6 +339,17 @@ async def _resolve_record_by_prompt_id(ctx: AppContext, *, prompt_id: str) -> tu
             )
         except Exception:
             items = []
+        if not items:
+            try:
+                items = await bitable.search_records(
+                    filter_={
+                        "conjunction": "and",
+                        "conditions": [{"field_name": prompt_field, "operator": "contains", "value": [pid]}],
+                    },
+                    page_size=1,
+                )
+            except Exception:
+                items = []
         if items:
             rid = items[0].get("record_id")
             if rid:
@@ -352,13 +418,18 @@ async def _write_back_record(
     record_id: str,
     ok: bool,
     file_tokens: list[dict[str, Any]],
+    result_urls: list[str],
+    prompt_id: str | None,
     error: str | None,
+    cb_ctx: dict[str, Any] | None,
 ) -> None:
     fields_cfg = dict(getattr(table_cfg, "fields", {}) or {})
     status_values_cfg = dict(getattr(table_cfg, "status_values", {}) or {})
+    allowed: set[str] | None = None
     if isinstance(workflow_cfg, dict):
         wf_fields = workflow_cfg.get("writeBackFields")
         if isinstance(wf_fields, dict):
+            allowed = {str(k) for k in wf_fields.keys() if isinstance(k, str) and str(k).strip()}
             for k, v in wf_fields.items():
                 if isinstance(k, str) and isinstance(v, str):
                     fields_cfg[k] = v
@@ -370,17 +441,87 @@ async def _write_back_record(
 
     fields: dict[str, Any] = {}
     status_field = fields_cfg.get("status")
-    if status_field:
+    if status_field and not (isinstance(cb_ctx, dict) and cb_ctx.get("split_group")):
         status_key = "done" if ok else "failed"
         status_value = status_values_cfg.get(status_key)
         if status_value:
             fields[status_field] = status_value
 
-    output_field = fields_cfg.get("output")
-    if output_field and file_tokens:
-        fields[output_field] = file_tokens
+    output_field = fields_cfg.get("output") if (allowed is None or "output" in allowed) else None
+    append_output = bool(isinstance(cb_ctx, dict) and cb_ctx.get("append_output"))
+    if output_field and (file_tokens or result_urls):
+        meta_map: dict[str, dict[str, Any]] = {}
+        cache_key = str(getattr(table_cfg, "table_id", "") or "") or str(output_field)
+        now = time.time()
+        async with _FIELDS_META_CACHE_LOCK:
+            cached = _FIELDS_META_CACHE.get(cache_key)
+        if cached and (now - float(cached[0] or 0.0)) < 300:
+            meta_map = cached[1]
+        else:
+            items: list[dict[str, Any]] = []
+            if hasattr(bitable, "list_fields"):
+                try:
+                    items = await bitable.list_fields()
+                except Exception:
+                    items = []
+            meta_map = {}
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                fn = it.get("field_name")
+                if isinstance(fn, str) and fn:
+                    meta_map[fn] = it
+            async with _FIELDS_META_CACHE_LOCK:
+                _FIELDS_META_CACHE[cache_key] = (now, meta_map)
 
-    error_field = fields_cfg.get("error")
+        ui_type = ""
+        try:
+            ui_type = str((meta_map.get(output_field) or {}).get("ui_type") or "")
+        except Exception:
+            ui_type = ""
+        want_attachment = "Attachment" in ui_type
+
+        if append_output:
+            try:
+                rec = await bitable.get_record(record_id)
+            except Exception:
+                rec = {}
+            cur_fields = rec.get("fields") if isinstance(rec, dict) and isinstance(rec.get("fields"), dict) else {}
+            cur_v = cur_fields.get(output_field)
+            if want_attachment:
+                cur_list = cur_v if isinstance(cur_v, list) else []
+                add_list = file_tokens if file_tokens else []
+                merged_list: list[dict[str, Any]] = []
+                seen: set[str] = set()
+                for it in (cur_list or []) + (add_list or []):
+                    if not isinstance(it, dict):
+                        continue
+                    tok = it.get("file_token") or it.get("fileToken")
+                    ts = str(tok or "").strip()
+                    if not ts or ts in seen:
+                        continue
+                    seen.add(ts)
+                    merged_list.append({"file_token": ts})
+                fields[output_field] = merged_list
+            else:
+                cur_s = str(cur_v).strip() if isinstance(cur_v, str) else ""
+                parts = [x.strip() for x in cur_s.splitlines() if x.strip()] if cur_s else []
+                for u in result_urls or []:
+                    us = str(u or "").strip()
+                    if us and us not in parts:
+                        parts.append(us)
+                fields[output_field] = "\n".join(parts) if parts else ""
+        else:
+            if want_attachment:
+                if file_tokens:
+                    fields[output_field] = file_tokens
+            else:
+                if result_urls:
+                    fields[output_field] = "\n".join([str(x).strip() for x in result_urls if str(x).strip()])
+
+    error_field = None
+    if not (isinstance(cb_ctx, dict) and cb_ctx.get("split_group")):
+        error_field = fields_cfg.get("error") if (allowed is None or "error" in allowed) else None
     if error_field:
         fields[error_field] = "" if ok else (error or "unknown error")
 
@@ -397,6 +538,87 @@ async def _write_back_record(
                     await bitable.update_record(record_id, fields2)
             else:
                 raise
+
+
+async def _update_split_progress_and_maybe_finalize(
+    *,
+    bitable: Any | None,
+    table_cfg: Any | None,
+    workflow_cfg: dict[str, Any] | None,
+    table_key: str,
+    record_id: str,
+    ok: bool,
+    cb_ctx: dict[str, Any],
+) -> dict[str, Any] | None:
+    group = str(cb_ctx.get("split_group") or "").strip()
+    total0 = cb_ctx.get("split_total")
+    total = int(total0) if isinstance(total0, int) else (int(str(total0)) if str(total0).strip().isdigit() else 0)
+    if not group or total <= 0:
+        return None
+
+    now = time.time()
+    k = (str(table_key or ""), str(record_id or ""), group)
+    async with _SPLIT_PROGRESS_LOCK:
+        for kk, vv in list(_SPLIT_PROGRESS.items()):
+            ts = float((vv or {}).get("ts") or 0.0)
+            if not ts or (now - ts) > 3600:
+                _SPLIT_PROGRESS.pop(kk, None)
+        st = _SPLIT_PROGRESS.get(k) or {"ts": now, "total": total, "done": 0, "failed": 0}
+        st["ts"] = now
+        st["total"] = max(int(st.get("total") or 0), total)
+        st["done"] = int(st.get("done") or 0) + 1
+        if not ok:
+            st["failed"] = int(st.get("failed") or 0) + 1
+        _SPLIT_PROGRESS[k] = st
+        done = int(st.get("done") or 0)
+        failed = int(st.get("failed") or 0)
+        total2 = int(st.get("total") or 0)
+
+    if done < total2:
+        return {"table_key": table_key, "record_id": record_id, "group": group, "total": total2, "done": done, "failed": failed, "final": False}
+
+    async with _SPLIT_SUMMARY_NOTIFIED_LOCK:
+        for kk, ts in list(_SPLIT_SUMMARY_NOTIFIED.items()):
+            if not ts or (now - float(ts or 0.0)) > 3600:
+                _SPLIT_SUMMARY_NOTIFIED.pop(kk, None)
+        if k in _SPLIT_SUMMARY_NOTIFIED:
+            return {"table_key": table_key, "record_id": record_id, "group": group, "total": total2, "done": done, "failed": failed, "final": True}
+        _SPLIT_SUMMARY_NOTIFIED[k] = now
+
+    fields_cfg = dict(getattr(table_cfg, "fields", {}) or {})
+    status_values_cfg = dict(getattr(table_cfg, "status_values", {}) or {})
+    if isinstance(workflow_cfg, dict):
+        wf_fields = workflow_cfg.get("writeBackFields")
+        if isinstance(wf_fields, dict):
+            for k0, v0 in wf_fields.items():
+                if isinstance(k0, str) and isinstance(v0, str):
+                    fields_cfg[k0] = v0
+        wf_status_values = workflow_cfg.get("writeBackStatusValues")
+        if isinstance(wf_status_values, dict):
+            for k1, v1 in wf_status_values.items():
+                if isinstance(k1, str) and isinstance(v1, str):
+                    status_values_cfg[k1] = v1
+
+    status_field = fields_cfg.get("status")
+    if not status_field:
+        _SPLIT_PROGRESS.pop(k, None)
+        return {"table_key": table_key, "record_id": record_id, "group": group, "total": total2, "done": done, "failed": failed, "status": "failed" if failed > 0 else "done", "final": True}
+    status_key = "done"
+    if failed > 0 and failed < total2:
+        status_key = "partial"
+    elif failed >= total2 and total2 > 0:
+        status_key = "failed"
+    status_value = status_values_cfg.get(status_key)
+    if not status_value:
+        _SPLIT_PROGRESS.pop(k, None)
+        return {"table_key": table_key, "record_id": record_id, "group": group, "total": total2, "done": done, "failed": failed, "status": status_key, "final": True}
+    if bitable:
+        try:
+            await bitable.update_record(record_id, {status_field: status_value})
+        except Exception:
+            pass
+    _SPLIT_PROGRESS.pop(k, None)
+    return {"table_key": table_key, "record_id": record_id, "group": group, "total": total2, "done": done, "failed": failed, "status": status_key, "final": True}
 
 
 def create_callback_app(ctx: AppContext) -> FastAPI:
@@ -635,7 +857,7 @@ def create_callback_app(ctx: AppContext) -> FastAPI:
         table_key = str(table or ctx.default_table_key or "")
         bitable = ctx.bitables.get(table_key) if table_key else None
         if not bitable:
-            return {"ok": False, "error": "missing table"}
+            return {"ok": False, "error": "missing table", "status": _bitable_status_snapshot(ctx)}
         if not hasattr(bitable, "list_fields"):
             return {"ok": False, "error": "list_fields not supported"}
         try:
@@ -649,7 +871,7 @@ def create_callback_app(ctx: AppContext) -> FastAPI:
         table_key = str(table or ctx.default_table_key or "")
         bitable = ctx.bitables.get(table_key) if table_key else None
         if not bitable:
-            return {"ok": False, "error": "missing table"}
+            return {"ok": False, "error": "missing table", "status": _bitable_status_snapshot(ctx)}
         if not record_id:
             return {"ok": False, "error": "missing record_id"}
         try:
@@ -657,6 +879,198 @@ def create_callback_app(ctx: AppContext) -> FastAPI:
         except Exception as e:
             return {"ok": False, "error": str(e)}
         return {"ok": True, "table": table_key, "record": rec}
+
+    @app.get("/_local/bitable/records")
+    async def local_bitable_records(
+        table: str | None = None,
+        view_id: str | None = None,
+        page_size: int = 20,
+        page_token: str | None = None,
+        fields: str | None = None,
+    ) -> dict[str, Any]:
+        table_key = str(table or ctx.default_table_key or "")
+        bitable = ctx.bitables.get(table_key) if table_key else None
+        if not bitable:
+            return {"ok": False, "error": "missing table", "status": _bitable_status_snapshot(ctx)}
+        if not hasattr(bitable, "list_records_page"):
+            return {"ok": False, "error": "list_records_page not supported"}
+
+        ps = int(page_size) if isinstance(page_size, int) else 20
+        ps = max(1, min(200, ps))
+        vid = str(view_id).strip() if isinstance(view_id, str) and view_id.strip() else None
+        pt = str(page_token).strip() if isinstance(page_token, str) and page_token.strip() else None
+
+        want_fields: list[str] = []
+        if isinstance(fields, str) and fields.strip():
+            want_fields = [x.strip() for x in fields.split(",") if x.strip()]
+
+        try:
+            items, next_token, has_more, total = await bitable.list_records_page(view_id=vid, page_size=ps, page_token=pt)
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+        out_items: list[dict[str, Any]] = []
+        for it in items or []:
+            if not isinstance(it, dict):
+                continue
+            rid = it.get("record_id")
+            f0 = it.get("fields") if isinstance(it.get("fields"), dict) else {}
+            if not want_fields:
+                out_items.append({"record_id": rid, "fields": f0})
+                continue
+            raw_selected: dict[str, Any] = {}
+            display_selected: dict[str, Any] = {}
+            for fn in want_fields:
+                rv = f0.get(fn)
+                raw_selected[fn] = rv
+                dv = _collect_display_strings(rv)
+                display_selected[fn] = dv if len(dv) != 1 else dv[0]
+            out_items.append({"record_id": rid, "raw": raw_selected, "display": display_selected})
+
+        return {
+            "ok": True,
+            "table": table_key,
+            "view_id": vid,
+            "page_size": ps,
+            "page_token": pt,
+            "next_page_token": next_token,
+            "has_more": bool(has_more),
+            "total": int(total or 0),
+            "items": out_items,
+        }
+
+    @app.get("/_local/bitable/relation_prompt")
+    async def local_bitable_relation_prompt(
+        workflow: str,
+        record_id: str,
+        table: str | None = None,
+    ) -> dict[str, Any]:
+        from .dispatcher import _resolve_relation_prompts
+
+        wk = str(workflow or "").strip()
+        rid = str(record_id or "").strip()
+        if not wk:
+            return {"ok": False, "error": "missing workflow"}
+        if not rid:
+            return {"ok": False, "error": "missing record_id"}
+
+        raw_cfg = (ctx.config.get("workflows") or {}).get(wk) or {}
+        if not isinstance(raw_cfg, dict):
+            return {"ok": False, "error": "workflow config not found"}
+        relation_prompt = raw_cfg.get("relationPrompt") or raw_cfg.get("relation_prompt")
+        if not isinstance(relation_prompt, dict):
+            return {"ok": False, "error": "workflow missing relationPrompt"}
+
+        resolved_table_key = str(table or raw_cfg.get("table") or ctx.default_table_key or "").strip()
+        bitable = ctx.bitables.get(resolved_table_key) if resolved_table_key else None
+        if not bitable:
+            return {"ok": False, "error": "missing table", "status": _bitable_status_snapshot(ctx)}
+
+        try:
+            rec = await bitable.get_record(rid)
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+        fields0 = rec.get("fields") if isinstance(rec, dict) and isinstance(rec.get("fields"), dict) else {}
+
+        src_field = relation_prompt.get("sourceField") or relation_prompt.get("source_field")
+        src_field = str(src_field).strip() if isinstance(src_field, str) and str(src_field).strip() else ""
+        if not src_field:
+            return {"ok": False, "error": "relationPrompt missing sourceField"}
+        src_val = fields0.get(src_field)
+
+        tgt_key = relation_prompt.get("targetTableKey") or relation_prompt.get("target_table_key")
+        tgt_key = str(tgt_key).strip() if isinstance(tgt_key, str) and str(tgt_key).strip() else None
+        tgt_app = relation_prompt.get("targetAppToken") or relation_prompt.get("target_app_token") or relation_prompt.get("app_token")
+        tgt_app = str(tgt_app).strip() if isinstance(tgt_app, str) and str(tgt_app).strip() else None
+        tgt_tid = relation_prompt.get("targetTableId") or relation_prompt.get("target_table_id") or relation_prompt.get("table_id")
+        tgt_tid = str(tgt_tid).strip() if isinstance(tgt_tid, str) and str(tgt_tid).strip() else None
+        tgt_match = relation_prompt.get("targetMatchField") or relation_prompt.get("target_match_field")
+        tgt_match = str(tgt_match).strip() if isinstance(tgt_match, str) and str(tgt_match).strip() else None
+
+        pf = relation_prompt.get("promptFields") or relation_prompt.get("prompt_fields") or []
+        prompt_fields: list[str] = []
+        if isinstance(pf, list):
+            for x in pf:
+                if isinstance(x, str) and x.strip():
+                    prompt_fields.append(x.strip())
+        elif isinstance(pf, str) and pf.strip():
+            prompt_fields = [pf.strip()]
+        if not prompt_fields:
+            return {"ok": False, "error": "relationPrompt missing promptFields"}
+
+        join_with = relation_prompt.get("joinWith") or relation_prompt.get("join_with") or "\n"
+        join_with = str(join_with) if isinstance(join_with, str) else "\n"
+        max_items = relation_prompt.get("maxItems") or relation_prompt.get("max_items") or 20
+        max_items = int(max_items) if isinstance(max_items, int) else (int(str(max_items)) if str(max_items).strip().isdigit() else 20)
+        max_items = max(1, min(100, max_items))
+        strict = relation_prompt.get("strict")
+        strict = True if strict is None else bool(strict)
+
+        try:
+            prompts = await _resolve_relation_prompts(
+                ctx,
+                source_value=src_val,
+                target_app_token=tgt_app,
+                target_table_id=tgt_tid,
+                target_table_key=tgt_key,
+                target_match_field=tgt_match,
+                prompt_fields=prompt_fields,
+                join_with=join_with,
+                max_items=max_items,
+                strict=strict,
+            )
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+        return {
+            "ok": True,
+            "workflow": wk,
+            "table": resolved_table_key,
+            "record_id": rid,
+            "source": {"field": src_field, "raw": src_val, "display": _collect_display_strings(src_val)},
+            "target": {"table_key": tgt_key, "table_id": tgt_tid, "match_field": tgt_match, "prompt_fields": prompt_fields, "join_with": join_with},
+            "resolved": {"count": len(prompts), "items": prompts},
+        }
+
+    @app.get("/_local/workflow/preview")
+    async def local_workflow_preview(
+        workflow: str,
+        record_id: str | None = None,
+        row: int | None = None,
+        view_id: str | None = None,
+        table: str | None = None,
+        resolve_files: bool = False,
+    ) -> dict[str, Any]:
+        from .dispatcher import TriggerContext, preview_workflow_runs
+
+        wk = str(workflow or "").strip()
+        if not wk:
+            return {"ok": False, "error": "missing workflow"}
+        rid = str(record_id or "").strip() if isinstance(record_id, str) else None
+        r = int(row) if isinstance(row, int) else None
+        vid = str(view_id).strip() if isinstance(view_id, str) and str(view_id).strip() else None
+        tk = str(table or "").strip() if isinstance(table, str) and str(table).strip() else None
+
+        trig = TriggerContext(chat_id=None, user_open_id=None, source="local.workflow.preview")
+        try:
+            obj = await preview_workflow_runs(
+                ctx,
+                trigger=trig,
+                workflow_key=wk,
+                record_id=rid,
+                row=r,
+                view_id=vid,
+                params={},
+                table_key=tk,
+                resolve_files=bool(resolve_files),
+            )
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+        return {"ok": True, "preview": obj}
+
+    @app.get("/_local/bitable/status")
+    async def local_bitable_status() -> dict[str, Any]:
+        return {"ok": True, "status": _bitable_status_snapshot(ctx)}
 
     @app.get("/healthz")
     async def healthz() -> dict[str, Any]:
@@ -751,6 +1165,9 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
     table_key = _resolve_table_key(ctx, cb_ctx)
     chat_id = cb_ctx.get("chat_id")
     workflow_name = cb_ctx.get("workflow")
+    run_log_table_key = cb_ctx.get("runLogTableKey") or cb_ctx.get("run_log_table_key")
+    run_log_record_id = cb_ctx.get("runLogRecordId") or cb_ctx.get("run_log_record_id")
+    run_log_submitted_at_ms = cb_ctx.get("runLogSubmittedAtMs") or cb_ctx.get("run_log_submitted_at_ms")
 
     if (not record_id or not table_key) and prompt_id and hasattr(ctx.runner, "resolve_prompt"):
         try:
@@ -770,6 +1187,22 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
             if not chat_id:
                 cid = resolved.get("chat_id")
                 chat_id = str(cid) if cid else chat_id
+            if not run_log_table_key:
+                tlk = resolved.get("run_log_table_key")
+                run_log_table_key = str(tlk) if tlk else run_log_table_key
+            if not run_log_record_id:
+                rlr = resolved.get("run_log_record_id")
+                run_log_record_id = str(rlr) if rlr else run_log_record_id
+            if run_log_submitted_at_ms is None:
+                run_log_submitted_at_ms = resolved.get("run_log_submitted_at_ms")
+            if isinstance(resolved.get("split_group"), str) and not cb_ctx.get("split_group"):
+                cb_ctx["split_group"] = resolved.get("split_group")
+            if resolved.get("split_total") is not None and cb_ctx.get("split_total") is None:
+                cb_ctx["split_total"] = resolved.get("split_total")
+            if resolved.get("split_index") is not None and cb_ctx.get("split_index") is None:
+                cb_ctx["split_index"] = resolved.get("split_index")
+            if resolved.get("append_output") is not None and cb_ctx.get("append_output") is None:
+                cb_ctx["append_output"] = resolved.get("append_output")
 
     if (not record_id or not table_key) and prompt_id:
         rid, tk = await _resolve_record_by_prompt_id(ctx, prompt_id=prompt_id)
@@ -780,6 +1213,8 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
 
     bitable = ctx.bitables.get(table_key) if table_key else None
     table_cfg = ctx.bitable_configs.get(table_key) if table_key else None
+    runlog_bitable = ctx.bitables.get(str(run_log_table_key)) if isinstance(run_log_table_key, str) and run_log_table_key else None
+    runlog_cfg = ctx.bitable_configs.get(str(run_log_table_key)) if isinstance(run_log_table_key, str) and run_log_table_key else None
 
     dump_dir = os.environ.get("CALLBACK_DUMP_DIR", "").strip()
     if dump_dir:
@@ -850,6 +1285,8 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
                 return {"ok": True}
             _DONE_NOTIFIED[prompt_id] = now
 
+    split_summary: dict[str, Any] | None = None
+
     provider = payload.get("provider")
     provider = str(provider).strip().lower() if isinstance(provider, str) else ""
     if provider not in ("runninghub",) and prompt_id and (not isinstance(payload.get("result"), dict) or not _iter_output_items(payload)):
@@ -866,6 +1303,8 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
 
     file_paths: list[str] = []
     file_tokens: list[dict[str, Any]] = []
+    writeback_errors: list[str] = []
+    runlog_file_tokens: list[dict[str, Any]] = []
 
     need_send_media = bool(isinstance(chat_id, str) and chat_id and not record_id)
     if (write_back_enabled and bitable and table_cfg and bitable.mode.write_enabled and ctx.drive) or need_send_media:
@@ -957,7 +1396,32 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
                 )
                 file_tokens.append({"file_token": up.file_token})
             except Exception as e:
-                print(f"Failed to upload {fp}: {e}")
+                msg = f"Failed to upload {fp}: {e}"
+                writeback_errors.append(msg)
+                logging.warning(msg)
+
+    if (
+        write_back_enabled
+        and run_log_record_id
+        and runlog_bitable
+        and runlog_cfg
+        and getattr(runlog_bitable, "mode", None)
+        and getattr(runlog_bitable.mode, "write_enabled", False)
+        and ctx.drive
+        and file_paths
+    ):
+        for fp in file_paths:
+            try:
+                up = await ctx.drive.upload_to_bitable(
+                    app_token=runlog_cfg.app_token,
+                    file_path=fp,
+                    as_image=_guess_is_image(fp),
+                )
+                runlog_file_tokens.append({"file_token": up.file_token})
+            except Exception as e:
+                msg = f"Failed to upload(runlog) {fp}: {e}"
+                writeback_errors.append(msg)
+                logging.warning(msg)
 
     if write_back_enabled and record_id and bitable and table_cfg and bitable.mode.write_enabled:
         try:
@@ -968,8 +1432,85 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
                 record_id=record_id,
                 ok=ok,
                 file_tokens=file_tokens,
+                result_urls=result_urls,
+                prompt_id=prompt_id,
                 error=err,
+                cb_ctx=cb_ctx if isinstance(cb_ctx, dict) else None,
             )
+        except Exception as e:
+            msg = f"write back record failed: table={table_key} record={record_id} err={e}"
+            writeback_errors.append(msg)
+            logging.warning(msg)
+
+    if write_back_enabled and run_log_record_id and runlog_bitable and runlog_cfg and getattr(runlog_bitable, "mode", None) and getattr(runlog_bitable.mode, "write_enabled", False):
+        now_ms = int(time.time() * 1000)
+        submitted_ms = run_log_submitted_at_ms
+        try:
+            submitted_ms = int(submitted_ms) if submitted_ms is not None else None
+        except Exception:
+            submitted_ms = None
+        duration_sec = None
+        if isinstance(submitted_ms, int) and submitted_ms > 0:
+            duration_sec = max(0, int((now_ms - submitted_ms) / 1000))
+
+        def _col(key: str) -> str | None:
+            try:
+                v = (runlog_cfg.fields or {}).get(key)
+            except Exception:
+                v = None
+            return str(v) if isinstance(v, str) and v.strip() else None
+
+        updates: dict[str, Any] = {}
+        st_col = _col("task_status")
+        if st_col:
+            updates[st_col] = "成功" if ok else "失败"
+        fin_col = _col("finished_at")
+        if fin_col:
+            updates[fin_col] = now_ms
+        dur_col = _col("duration_sec")
+        if dur_col and duration_sec is not None:
+            updates[dur_col] = duration_sec
+        ec = payload.get("errorCode")
+        ec = str(ec).strip() if isinstance(ec, str) and str(ec).strip() else (str(ec).strip() if ec is not None else "")
+        if not ok:
+            code_col = _col("error_code")
+            if code_col and ec:
+                updates[code_col] = ec
+            msg_col = _col("error_message")
+            if msg_col and err:
+                updates[msg_col] = err
+        if runlog_file_tokens:
+            out_col = _col("output")
+            if out_col:
+                updates[out_col] = runlog_file_tokens
+
+        if updates:
+            try:
+                await runlog_bitable.update_record(str(run_log_record_id), updates)
+            except Exception as e:
+                msg = f"write runlog failed: table={run_log_table_key} record={run_log_record_id} err={e}"
+                writeback_errors.append(msg)
+                logging.warning(msg)
+
+    if isinstance(cb_ctx, dict) and cb_ctx.get("split_group") and record_id and table_key:
+        try:
+            split_summary = await _update_split_progress_and_maybe_finalize(
+                bitable=bitable,
+                table_cfg=table_cfg,
+                workflow_cfg=workflow_cfg,
+                table_key=str(table_key or ""),
+                record_id=str(record_id or ""),
+                ok=ok,
+                cb_ctx=cb_ctx,
+            )
+        except Exception:
+            split_summary = None
+
+    if writeback_errors and isinstance(chat_id, str) and chat_id and not (isinstance(cb_ctx, dict) and cb_ctx.get("split_group")):
+        try:
+            tip = writeback_errors[0]
+            extra = f"（另有 {len(writeback_errors) - 1} 个回写/上传错误）" if len(writeback_errors) > 1 else ""
+            await IMClient(ctx.auth).send_text(chat_id=chat_id, text=f"飞书回写/上传失败{extra}：{tip}")
         except Exception:
             pass
 
@@ -982,8 +1523,48 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
     if isinstance(chat_id, str) and chat_id:
         im = IMClient(ctx.auth)
         rid0 = str(record_id or "").strip()
+        split_group = str((cb_ctx or {}).get("split_group") or "").strip() if isinstance(cb_ctx, dict) else ""
         if rid0 and not rid0.startswith("mock_rec_"):
-            await im.send_text(chat_id=chat_id, text=("已完成" if ok else "失败") + f" record={record_id}")
+            if split_group:
+                idx0 = (cb_ctx or {}).get("split_index") if isinstance(cb_ctx, dict) else None
+                idx = int(idx0) if isinstance(idx0, int) else (int(str(idx0)) if str(idx0).strip().isdigit() else 0)
+                total0 = (cb_ctx or {}).get("split_total") if isinstance(cb_ctx, dict) else None
+                total = int(total0) if isinstance(total0, int) else (int(str(total0)) if str(total0).strip().isdigit() else int((split_summary or {}).get("total") or 0))
+                done = int((split_summary or {}).get("done") or 0) if isinstance(split_summary, dict) else 0
+                failed = int((split_summary or {}).get("failed") or 0) if isinstance(split_summary, dict) else 0
+                succ = max(0, done - failed)
+                pid_short = (prompt_id or "").strip() if isinstance(prompt_id, str) else ""
+                msg_lines: list[str] = []
+                msg_lines.append(f"子任务 {idx + 1}/{total} {'成功' if ok else '失败'}（进度 {done}/{total}，成功{succ}，失败{failed}）")
+                if rid0:
+                    msg_lines.append(f"record={rid0}")
+                if pid_short:
+                    msg_lines.append(f"task={pid_short}")
+                if not ok and isinstance(err, str) and err.strip():
+                    first_err = err.strip().splitlines()[0]
+                    if len(first_err) > 200:
+                        first_err = first_err[:200] + "..."
+                    msg_lines.append(f"原因：{first_err}")
+                if ok:
+                    out_n = len(runlog_file_tokens) if runlog_file_tokens else (len(file_paths) if file_paths else len(result_urls))
+                    if out_n:
+                        msg_lines.append(f"产出：{out_n}")
+                if writeback_errors:
+                    tip = str(writeback_errors[0] or "").strip()
+                    if tip:
+                        if len(tip) > 200:
+                            tip = tip[:200] + "..."
+                        msg_lines.append(f"回写提示：{tip}")
+                await im.send_text(chat_id=chat_id, text="\n".join([x for x in msg_lines if x]))
+
+                if isinstance(split_summary, dict) and bool(split_summary.get("final")):
+                    total2 = int(split_summary.get("total") or 0)
+                    done2 = int(split_summary.get("done") or 0)
+                    failed2 = int(split_summary.get("failed") or 0)
+                    succ2 = max(0, done2 - failed2)
+                    await im.send_text(chat_id=chat_id, text=f"批次完成 record={record_id}：成功{succ2}，失败{failed2}，共{total2}")
+            else:
+                await im.send_text(chat_id=chat_id, text=("已完成" if ok else "失败") + f" record={record_id}")
         elif file_paths:
             sent_any = False
             last_send_err: str | None = None
