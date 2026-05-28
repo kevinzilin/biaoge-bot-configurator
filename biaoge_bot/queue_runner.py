@@ -75,6 +75,7 @@ class _RunState:
     chat_id: str | None
     prompt_to_record: dict[str, str]
     remaining: int | None
+    empty_claims: int
 
 
 @dataclass
@@ -342,6 +343,7 @@ class QueueRunner:
                 cur.drain = bool(drain)
                 cur.chat_id = chat_id
                 cur.remaining = None if bool(drain) else max(0, b)
+                cur.empty_claims = 0
                 cur.active = True
             else:
                 self._runs[rk] = _RunState(
@@ -355,6 +357,7 @@ class QueueRunner:
                     chat_id=chat_id,
                     prompt_to_record={},
                     remaining=None if bool(drain) else max(0, b),
+                    empty_claims=0,
                 )
         await self._fill(rk)
 
@@ -545,66 +548,82 @@ class QueueRunner:
             self._filling.add(rk)
 
         try:
-            async with self._lock:
-                st = self._runs.get(rk)
-                if not st or not st.active:
-                    return
-                if not st.drain and isinstance(st.remaining, int) and st.remaining <= 0:
-                    if st.inflight <= 0:
-                        st.active = False
-                    return
-                ctx = self._ctx
-                bitable = ctx.bitables.get(st.table_key)
-                table_cfg = ctx.bitable_configs.get(st.table_key)
-                if not bitable or not table_cfg:
-                    st.active = False
-                    return
-                if not bitable.mode.write_enabled:
-                    st.active = False
-                    return
-
-                needed = st.inflight_limit - st.inflight
-                if needed <= 0:
-                    return
-
-                status_field = table_cfg.fields.get("status")
-                queued_value = table_cfg.status_values.get("queued")
-                running_value = table_cfg.status_values.get("running")
-                created_time_field = table_cfg.fields.get("created_time")
-                if not status_field or not queued_value or not running_value:
-                    st.active = False
-                    return
-
-                if not st.drain and isinstance(st.remaining, int):
-                    needed = min(needed, max(0, st.remaining))
-                    if needed <= 0:
+            while True:
+                async with self._lock:
+                    st = self._runs.get(rk)
+                    if not st or not st.active:
+                        return
+                    if not st.drain and isinstance(st.remaining, int) and st.remaining <= 0:
                         if st.inflight <= 0:
                             st.active = False
                         return
+                    ctx = self._ctx
+                    bitable = ctx.bitables.get(st.table_key)
+                    table_cfg = ctx.bitable_configs.get(st.table_key)
+                    if not bitable or not table_cfg:
+                        st.active = False
+                        return
+                    if not bitable.mode.write_enabled:
+                        st.active = False
+                        return
 
-            ids = await self._claim_records(
-                rk=rk,
-                limit=min(needed, st.batch) if st.drain else needed,
-                status_field=status_field,
-                queued_value=queued_value,
-                running_value=running_value,
-                sort_field=created_time_field,
-            )
-            async with self._lock:
-                st3 = self._runs.get(rk)
-                if st3 and not st3.drain and isinstance(st3.remaining, int):
-                    st3.remaining = max(0, int(st3.remaining) - len(ids))
-            if not ids:
+                    needed = st.inflight_limit - st.inflight
+                    if needed <= 0:
+                        return
+
+                    status_field = table_cfg.fields.get("status")
+                    queued_value = table_cfg.status_values.get("queued")
+                    running_value = table_cfg.status_values.get("running")
+                    created_time_field = table_cfg.fields.get("created_time")
+                    if not status_field or not queued_value or not running_value:
+                        st.active = False
+                        return
+
+                    if not st.drain and isinstance(st.remaining, int):
+                        needed = min(needed, max(0, st.remaining))
+                        if needed <= 0:
+                            if st.inflight <= 0:
+                                st.active = False
+                            return
+
+                ids = await self._claim_records(
+                    rk=rk,
+                    limit=min(needed, st.batch) if st.drain else needed,
+                    status_field=status_field,
+                    queued_value=queued_value,
+                    running_value=running_value,
+                    sort_field=created_time_field,
+                )
                 async with self._lock:
-                    st2 = self._runs.get(rk)
-                    if st2 and st2.active and st2.inflight == 0:
-                        st2.active = False
-                return
+                    st3 = self._runs.get(rk)
+                    if st3 and ids:
+                        st3.empty_claims = 0
+                    if st3 and not st3.drain and isinstance(st3.remaining, int):
+                        st3.remaining = max(0, int(st3.remaining) - len(ids))
+                if not ids:
+                    async with self._lock:
+                        st2 = self._runs.get(rk)
+                        if st2 and st2.active and st2.inflight == 0:
+                            if st2.drain:
+                                # 飞书搜索偶尔会有短暂延迟，drain 模式下先重试几次，别因为一次空结果就提前停掉。
+                                st2.empty_claims = int(getattr(st2, "empty_claims", 0) or 0) + 1
+                                should_retry = st2.empty_claims < 3
+                            else:
+                                should_retry = False
+                                st2.active = False
+                        else:
+                            should_retry = False
+                    if should_retry:
+                        await asyncio.sleep(1.5)
+                        continue
+                    async with self._lock:
+                        st4 = self._runs.get(rk)
+                        if st4 and st4.active and st4.inflight == 0:
+                            st4.active = False
+                    return
 
-            for record_id in ids:
-                await self._queue_one(rk=rk, record_id=record_id)
-
-            await self._fill(rk)
+                for record_id in ids:
+                    await self._queue_one(rk=rk, record_id=record_id)
         finally:
             async with self._lock:
                 self._filling.discard(rk)
