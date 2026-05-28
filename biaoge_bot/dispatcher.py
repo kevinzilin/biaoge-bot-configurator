@@ -20,6 +20,14 @@ from .comfyui import ComfyUIClient
 from .context import AppContext
 from .im import IMClient
 from .license_guard import check_license
+from .modules.bitable_logic import (
+    create_record as _enc_bitable_create_record,
+    map_fields_by_config as _enc_map_fields_by_config,
+    mark_status as _enc_mark_status,
+    reset_table_records as _enc_reset_table_records,
+    resolve_relation_param_items as _enc_resolve_relation_param_items,
+    resolve_relation_prompts as _enc_resolve_relation_prompts,
+)
 from .runninghub import RunningHubClient
 from .workflows import WorkflowSpec
 
@@ -582,72 +590,18 @@ async def _resolve_relation_prompts(
     max_items: int,
     strict: bool,
 ) -> list[str]:
-    bt = None
-    if isinstance(target_table_key, str) and target_table_key.strip():
-        bt = ctx.bitables.get(target_table_key.strip())
-    if bt is None:
-        at = str(target_app_token or "").strip()
-        tid = str(target_table_id or "").strip()
-        if at and tid:
-            try:
-                from .modules.bitable import BitableClient
-                from .ports import BitableConfig
-            except Exception:
-                bt = None
-            else:
-                cfg = BitableConfig(app_token=at, table_id=tid, view_id=None, fields={}, status_values={})
-                bt = BitableClient(ctx.auth, cfg, ctx.bitable_mode)
-
-    if bt is None:
-        if strict:
-            raise RuntimeError("relationPrompt 目标表未配置：请在 workflow 配置中填写 targetTableKey，或填写 targetAppToken + targetTableId")
-        return []
-
-    ids = _extract_relation_record_ids(source_value)
-    keys = _extract_relation_display_keys(source_value)
-    ids = [x for x in ids if x][: max_items]
-    keys = [x for x in keys if x][: max_items]
-
-    records: list[dict[str, Any]] = []
-    if ids:
-        for rid in ids:
-            try:
-                rec = await bt.get_record(rid)
-            except Exception:
-                rec = None
-            if isinstance(rec, dict):
-                records.append(rec)
-    elif keys and isinstance(target_match_field, str) and target_match_field.strip():
-        fn = target_match_field.strip()
-        for k in keys:
-            got = await _search_one_record_by_field(bt, field_name=fn, value=k)
-            if not got:
-                continue
-            rid = got.get("record_id")
-            if rid:
-                try:
-                    rec = await bt.get_record(str(rid))
-                except Exception:
-                    rec = None
-                if isinstance(rec, dict):
-                    records.append(rec)
-            else:
-                records.append(got)
-
-    out: list[str] = []
-    j = str(join_with if join_with is not None else "\n")
-    for rec in records:
-        fields = rec.get("fields") if isinstance(rec.get("fields"), dict) else {}
-        parts: list[str] = []
-        for fn in prompt_fields:
-            v = fields.get(fn) if fn else None
-            ss = _collect_display_strings(v)
-            if ss:
-                parts.append(ss[0])
-        s = j.join([x for x in parts if str(x).strip()]).strip()
-        if s:
-            out.append(s)
-    return out
+    return await _enc_resolve_relation_prompts(
+        ctx,
+        source_value=source_value,
+        target_app_token=target_app_token,
+        target_table_id=target_table_id,
+        target_table_key=target_table_key,
+        target_match_field=target_match_field,
+        prompt_fields=prompt_fields,
+        join_with=join_with,
+        max_items=max_items,
+        strict=strict,
+    )
 
 
 def _normalize_relation_field_value(value: Any) -> str:
@@ -687,81 +641,20 @@ async def _resolve_relation_param_items(
     max_items: int,
     strict: bool,
 ) -> list[dict[str, Any]]:
-    bt = None
-    if isinstance(target_table_key, str) and target_table_key.strip():
-        bt = ctx.bitables.get(target_table_key.strip())
-    if bt is None:
-        at = str(target_app_token or "").strip()
-        tid = str(target_table_id or "").strip()
-        if at and tid:
-            try:
-                from .modules.bitable import BitableClient
-                from .ports import BitableConfig
-            except Exception:
-                bt = None
-            else:
-                cfg = BitableConfig(app_token=at, table_id=tid, view_id=None, fields={}, status_values={})
-                bt = BitableClient(ctx.auth, cfg, ctx.bitable_mode)
-
-    if bt is None:
-        if strict:
-            raise RuntimeError("relationPrompt 目标表未配置：请在 workflow 配置中填写 targetTableKey，或填写 targetAppToken + targetTableId")
-        return []
-
-    ids = _extract_relation_record_ids(source_value)
-    keys = _extract_relation_display_keys(source_value)
-    ids = [x for x in ids if x][: max_items]
-    keys = [x for x in keys if x][: max_items]
-
-    records: list[dict[str, Any]] = []
-    if ids:
-        for rid in ids:
-            try:
-                rec = await bt.get_record(rid)
-            except Exception:
-                rec = None
-            if isinstance(rec, dict):
-                records.append(rec)
-    elif keys and isinstance(target_match_field, str) and target_match_field.strip():
-        fn = target_match_field.strip()
-        for k in keys:
-            got = await _search_one_record_by_field(bt, field_name=fn, value=k)
-            if not got:
-                continue
-            rid = got.get("record_id")
-            if rid:
-                try:
-                    rec = await bt.get_record(str(rid))
-                except Exception:
-                    rec = None
-                if isinstance(rec, dict):
-                    records.append(rec)
-            else:
-                records.append(got)
-
-    out: list[dict[str, Any]] = []
-    for rec in records:
-        fields = rec.get("fields") if isinstance(rec.get("fields"), dict) else {}
-        item: dict[str, Any] = {}
-        rid = rec.get("record_id")
-        if isinstance(rid, str) and rid.strip():
-            item["__relation_record_id"] = rid.strip()
-        for param_name, field_name in (item_param_map or {}).items():
-            pn = str(param_name or "").strip()
-            fn = str(field_name or "").strip()
-            if not pn or not fn:
-                continue
-            item[pn] = _normalize_relation_field_value(fields.get(fn))
-
-        pp = str(prompt_param or "").strip()
-        if pp and pp not in item and prompt_fields:
-            s = _build_relation_prompt_from_fields(fields, prompt_fields=list(prompt_fields), join_with=join_with)
-            if s:
-                item[pp] = s
-
-        if len(item) > (1 if "__relation_record_id" in item else 0):
-            out.append(item)
-    return out
+    return await _enc_resolve_relation_param_items(
+        ctx,
+        source_value=source_value,
+        target_app_token=target_app_token,
+        target_table_id=target_table_id,
+        target_table_key=target_table_key,
+        target_match_field=target_match_field,
+        item_param_map=item_param_map,
+        prompt_fields=prompt_fields,
+        join_with=join_with,
+        prompt_param=prompt_param,
+        max_items=max_items,
+        strict=strict,
+    )
 def _runninghub_node_file_value(file_name: str) -> str:
     s = str(file_name or "").strip()
     if not s:
@@ -1182,56 +1075,15 @@ def _build_inline_node_info_list(params: dict[str, Any]) -> list[dict[str, Any]]
 
 
 def _map_fields_by_config(cfg: Any, values: dict[str, Any]) -> dict[str, Any]:
-    out: dict[str, Any] = {}
-    fields = getattr(cfg, "fields", None) or {}
-    if not isinstance(fields, dict):
-        return out
-    for k, v in (values or {}).items():
-        col = fields.get(k)
-        if not isinstance(col, str) or not col.strip():
-            continue
-        if v is None:
-            continue
-        out[col] = v
-    return out
+    return _enc_map_fields_by_config(cfg, values)
 
 
 async def _bitable_create_record(*, auth: Any, app_token: str, table_id: str, fields: dict[str, Any]) -> str:
-    token = await auth.tenant_token()
-    url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records"
-    async with httpx.AsyncClient(timeout=15) as client:
-        r = await client.post(url, headers={"Authorization": f"Bearer {token}"}, json={"fields": fields})
-    r.raise_for_status()
-    obj = r.json()
-    if not isinstance(obj, dict):
-        raise RuntimeError("bitable create record failed: invalid response")
-    code = obj.get("code")
-    if code not in (0, "0", None):
-        raise RuntimeError(f"bitable create record failed: {obj}")
-    data = obj.get("data") or {}
-    if not isinstance(data, dict):
-        raise RuntimeError(f"bitable create record failed: {obj}")
-    rec = data.get("record") or {}
-    if not isinstance(rec, dict):
-        raise RuntimeError(f"bitable create record failed: {obj}")
-    rid = rec.get("record_id")
-    rid = str(rid).strip() if isinstance(rid, str) and str(rid).strip() else None
-    if not rid:
-        raise RuntimeError(f"bitable create record failed: {obj}")
-    return rid
+    return await _enc_bitable_create_record(auth=auth, app_token=app_token, table_id=table_id, fields=fields)
 
 
 async def _mark_status(bitable: Any, record_id: str, status_key: str) -> None:
-    if not bitable.mode.write_enabled or record_id.startswith("mock_rec_"):
-        return
-    cfg = bitable.config
-    status_field = cfg.fields.get("status")
-    if not status_field:
-        return
-    status_value = cfg.status_values.get(status_key)
-    if not status_value:
-        return
-    await bitable.update_record(record_id, {status_field: status_value})
+    await _enc_mark_status(bitable, record_id, status_key)
 
 
 def _status_values_for_reset(cfg: Any, scope: str) -> set[str]:
@@ -1259,128 +1111,7 @@ async def _reset_table_records(
     scope: str,
     clear: bool,
 ) -> tuple[int, int, int, int, int, int, int, int]:
-    if not bitable.mode.read_enabled or not bitable.mode.write_enabled:
-        return 0, 0, 0, 0, 0, 0, 0, 0
-    cfg = bitable.config
-    status_field = cfg.fields.get("status")
-    queued_value = cfg.status_values.get("queued")
-    if not status_field or not queued_value:
-        return 0, 0, 0, 0, 0, 0, 0, 0
-    targets = _status_values_for_reset(cfg, scope)
-    if not targets:
-        return 0, 0, 0, 0, 0, 0, 0, 0
-    output_field = cfg.fields.get("output")
-    error_field = cfg.fields.get("error")
-    prompt_field = cfg.fields.get("prompt_id")
-
-    fields_meta: dict[str, dict[str, Any]] = {}
-    if clear and hasattr(bitable, "list_fields"):
-        try:
-            meta_items = await bitable.list_fields()
-        except Exception:
-            meta_items = []
-        for it in meta_items:
-            if not isinstance(it, dict):
-                continue
-            name = it.get("field_name")
-            if isinstance(name, str) and name:
-                fields_meta[name] = it
-
-    def _ui_type(field_name: str) -> str:
-        meta = fields_meta.get(field_name) or {}
-        ui = meta.get("ui_type")
-        return str(ui) if ui is not None else ""
-
-    def _is_writable(field_name: str) -> bool:
-        ui = _ui_type(field_name)
-        if not ui:
-            return True
-        return ui not in {"Formula", "AutoNumber", "CreatedTime", "LastModifiedTime", "Lookup", "Rollup", "Button", "Workflow"}
-
-    def _is_empty(v: Any) -> bool:
-        if v is None:
-            return True
-        if isinstance(v, str):
-            return not v.strip()
-        if isinstance(v, list):
-            return len(v) == 0
-        return False
-
-    changed = 0
-    cleared_prompt = 0
-    cleared_error = 0
-    cleared_output = 0
-    failed_clear = 0
-    skipped_prompt = 0
-    skipped_error = 0
-    skipped_output = 0
-    page_token: str | None = None
-    while True:
-        items, page_token, has_more, _ = await bitable.list_records_page(view_id=cfg.view_id, page_size=200, page_token=page_token)
-        for it in items:
-            rid = it.get("record_id")
-            if not rid:
-                continue
-            fields = it.get("fields") if isinstance(it.get("fields"), dict) else {}
-            cur = fields.get(status_field)
-            if cur not in targets:
-                continue
-            await bitable.update_record(str(rid), {status_field: queued_value})
-            if clear:
-                if prompt_field and not _is_writable(prompt_field):
-                    skipped_prompt += 1
-                if error_field and not _is_writable(error_field):
-                    skipped_error += 1
-                if output_field and not _is_writable(output_field):
-                    skipped_output += 1
-                if prompt_field and _is_writable(prompt_field):
-                    for v in ("", None):
-                        try:
-                            await bitable.update_record(str(rid), {prompt_field: v})
-                            break
-                        except Exception:
-                            continue
-                if error_field and _is_writable(error_field):
-                    for v in ("", None):
-                        try:
-                            await bitable.update_record(str(rid), {error_field: v})
-                            break
-                        except Exception:
-                            continue
-                if output_field and _is_writable(output_field):
-                    for v in ([], None, ""):
-                        try:
-                            await bitable.update_record(str(rid), {output_field: v})
-                            break
-                        except Exception:
-                            continue
-                try:
-                    rec = await bitable.get_record(str(rid))
-                except Exception:
-                    rec = {}
-                rec_fields = rec.get("fields") if isinstance(rec, dict) and isinstance(rec.get("fields"), dict) else {}
-                ok_this = True
-                if prompt_field:
-                    if _is_empty(rec_fields.get(prompt_field)):
-                        cleared_prompt += 1
-                    else:
-                        ok_this = False if _is_writable(prompt_field) else ok_this
-                if error_field:
-                    if _is_empty(rec_fields.get(error_field)):
-                        cleared_error += 1
-                    else:
-                        ok_this = False if _is_writable(error_field) else ok_this
-                if output_field:
-                    if _is_empty(rec_fields.get(output_field)):
-                        cleared_output += 1
-                    else:
-                        ok_this = False if _is_writable(output_field) else ok_this
-                if not ok_this:
-                    failed_clear += 1
-            changed += 1
-        if not has_more or not page_token:
-            break
-    return changed, cleared_prompt, cleared_error, cleared_output, failed_clear, skipped_prompt, skipped_error, skipped_output
+    return await _enc_reset_table_records(bitable, scope=scope, clear=clear)
 
 
 async def run_workflow(

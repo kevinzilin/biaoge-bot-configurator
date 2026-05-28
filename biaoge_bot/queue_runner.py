@@ -11,6 +11,7 @@ from typing import Any
 from urllib.request import Request, urlopen
 
 from .dispatcher import TriggerContext, run_workflow
+from .modules.bitable_logic import claim_records as _enc_claim_records
 
 
 #region debug-point new-pc-generate-fail-queue-runner
@@ -624,26 +625,14 @@ class QueueRunner:
             bitable = ctx.bitables.get(st.table_key) if st else None
         if not st or not st.active or not bitable:
             return []
-
-        filter_ = {
-            "conjunction": "and",
-            "conditions": [{"field_name": status_field, "operator": "is", "value": [queued_value]}],
-        }
-        sort = [{"field_name": sort_field, "desc": False}] if sort_field else None
-        items = await bitable.search_records(filter_=filter_, sort=sort, page_size=limit)
-        out: list[str] = []
-        for it in items:
-            if len(out) >= limit:
-                break
-            record_id = it.get("record_id")
-            if not record_id:
-                continue
-            try:
-                await bitable.update_record(str(record_id), {status_field: running_value})
-            except Exception:
-                continue
-            out.append(str(record_id))
-        return out
+        return await _enc_claim_records(
+            bitable,
+            limit=limit,
+            status_field=status_field,
+            queued_value=queued_value,
+            running_value=running_value,
+            sort_field=sort_field,
+        )
 
     async def _queue_one(self, *, rk: str, record_id: str) -> None:
         async with self._lock:

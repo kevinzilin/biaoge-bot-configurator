@@ -27,6 +27,15 @@ from .context import AppContext
 from .dispatcher import TriggerContext, dispatch, dispatch_in_thread
 from .feishu_auth import FeishuAuth
 from .license_guard import check_license
+from .modules.bitable_logic import subscribe_bitable_files
+from .modules.bitable_trigger import (
+    extract_event_type as _enc_extract_bitable_event_type,
+    extract_operator_open_id as _enc_extract_operator_open_id,
+    extract_record_ids as _enc_extract_record_ids,
+    extract_table_ref as _enc_extract_table_ref,
+    resolve_table_key as _enc_resolve_table_key,
+    try_trigger_record as _enc_try_trigger_record,
+)
 from .ports import BitableConfig, BitableMode
 from .queue_runner import QueueRunner
 from .workflows import WorkflowRegistry
@@ -96,33 +105,30 @@ def _all_bitable_file_tokens_from_config(ctx: AppContext) -> list[str]:
 
 def _warm_bitable_event_subscriptions(ctx: AppContext) -> None:
     async def _job() -> None:
-        try:
-            token = await ctx.auth.tenant_token()
-        except Exception as e:
-            try:
-                logging.info("bitable_event_subscribe skipped: tenant_token error: %s", str(e))
-            except Exception:
-                pass
-            return
         ftokens = _all_bitable_file_tokens_from_config(ctx)
         if not ftokens:
             return
-        async with httpx.AsyncClient(timeout=10) as client:
-            for file_token in ftokens[:20]:
-                url = f"https://open.feishu.cn/open-apis/drive/v1/files/{file_token}/subscribe"
-                try:
-                    r = await client.post(url, headers={"Authorization": f"Bearer {token}"}, params={"file_type": "bitable"})
-                    ok = r.status_code < 400
-                    data = r.json() if ok else None
-                    if ok and isinstance(data, dict) and data.get("code") in (0, None):
-                        logging.info("bitable_event_subscribe ok (file_token=%s)", file_token)
-                    else:
-                        logging.info("bitable_event_subscribe failed (file_token=%s status=%s body=%s)", file_token, str(r.status_code), (r.text or "")[:500])
-                except Exception as e:
-                    try:
-                        logging.info("bitable_event_subscribe error (file_token=%s): %s", file_token, str(e))
-                    except Exception:
-                        pass
+        try:
+            results = await subscribe_bitable_files(auth=ctx.auth, file_tokens=ftokens)
+        except Exception as e:
+            try:
+                logging.info("bitable_event_subscribe skipped: %s", str(e))
+            except Exception:
+                pass
+            return
+        for item in results:
+            if bool(item.get("ok")):
+                logging.info("bitable_event_subscribe ok (file_token=%s)", str(item.get("file_token") or ""))
+            else:
+                if item.get("error"):
+                    logging.info("bitable_event_subscribe error (file_token=%s): %s", str(item.get("file_token") or ""), str(item.get("error") or ""))
+                else:
+                    logging.info(
+                        "bitable_event_subscribe failed (file_token=%s status=%s body=%s)",
+                        str(item.get("file_token") or ""),
+                        str(item.get("status_code") or ""),
+                        str(item.get("body") or "")[:500],
+                    )
 
     try:
         asyncio.run(_job())
@@ -1290,12 +1296,12 @@ def do_bitable_record_changed_event_factory(ctx: AppContext):
 
     def handler(data: Any) -> None:
         payload = _normalize_payload(data)
-        event_type = _extract_event_type(payload) or "unknown"
-        operator_open_id = _extract_operator_open_id(payload)
-        app_token, table_id = _extract_table_ref(payload)
-        record_ids = _extract_record_ids(payload)
+        event_type = _enc_extract_bitable_event_type(payload) or "unknown"
+        operator_open_id = _enc_extract_operator_open_id(payload, collect_values_by_key=_collect_values_by_key)
+        app_token, table_id = _enc_extract_table_ref(payload, collect_values_by_key=_collect_values_by_key)
+        record_ids = _enc_extract_record_ids(payload, collect_values_by_key=_collect_values_by_key)
         record_id = record_ids[0] if record_ids else None
-        table_key = _resolve_table_key(app_token, table_id)
+        table_key = _enc_resolve_table_key(ctx, app_token=app_token, table_id=table_id)
         try:
             logging.info(
                 "bitable_event received (event_type=%s table_key=%s record_id=%s operator_open_id=%s app_token=%s table_id=%s keys=%s)",
@@ -1331,7 +1337,7 @@ def do_bitable_record_changed_event_factory(ctx: AppContext):
             async def _job() -> None:
                 for rid in (record_ids or [])[:20]:
                     try:
-                        await _try_trigger_record(table_key=table_key, record_id=rid, operator_open_id=operator_open_id, payload=payload)
+                        await _enc_try_trigger_record(ctx, table_key=table_key, record_id=rid, operator_open_id=operator_open_id, payload=payload)
                     except Exception:
                         continue
 
