@@ -32,6 +32,8 @@ _SPLIT_PROGRESS: dict[tuple[str, str, str], dict[str, Any]] = {}
 _SPLIT_PROGRESS_LOCK = asyncio.Lock()
 _SPLIT_SUMMARY_NOTIFIED: dict[tuple[str, str, str], float] = {}
 _SPLIT_SUMMARY_NOTIFIED_LOCK = asyncio.Lock()
+_MAIN_WRITEBACK_LOCKS: dict[str, asyncio.Lock] = {}
+_MAIN_WRITEBACK_LOCKS_GUARD = asyncio.Lock()
 
 
 def _is_file_path(v: str) -> bool:
@@ -496,6 +498,19 @@ def _resolve_table_key(ctx: AppContext, cb_ctx: dict[str, Any]) -> str | None:
     return None
 
 
+async def _acquire_main_writeback_lock(table_cfg: Any, record_id: str) -> asyncio.Lock:
+    """给同一条主表记录的回写排队，避免并发覆盖已追加的图片。"""
+    table_id = str(getattr(table_cfg, "table_id", "") or "").strip()
+    rid = str(record_id or "").strip()
+    key = f"{table_id}::{rid}"
+    async with _MAIN_WRITEBACK_LOCKS_GUARD:
+        lock = _MAIN_WRITEBACK_LOCKS.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _MAIN_WRITEBACK_LOCKS[key] = lock
+        return lock
+
+
 async def _write_back_record(
     *,
     bitable: Any,
@@ -509,18 +524,20 @@ async def _write_back_record(
     error: str | None,
     cb_ctx: dict[str, Any] | None,
 ) -> None:
-    await _enc_write_back_record(
-        bitable=bitable,
-        table_cfg=table_cfg,
-        workflow_cfg=workflow_cfg,
-        record_id=record_id,
-        ok=ok,
-        file_tokens=file_tokens,
-        result_urls=result_urls,
-        prompt_id=prompt_id,
-        error=error,
-        cb_ctx=cb_ctx,
-    )
+    lock = await _acquire_main_writeback_lock(table_cfg, record_id)
+    async with lock:
+        await _enc_write_back_record(
+            bitable=bitable,
+            table_cfg=table_cfg,
+            workflow_cfg=workflow_cfg,
+            record_id=record_id,
+            ok=ok,
+            file_tokens=file_tokens,
+            result_urls=result_urls,
+            prompt_id=prompt_id,
+            error=error,
+            cb_ctx=cb_ctx,
+        )
 
 
 async def _update_runlog_record(
