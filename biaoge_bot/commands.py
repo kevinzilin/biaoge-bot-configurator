@@ -12,6 +12,7 @@ class Command:
 
 
 _SPACE = re.compile(r"\s+")
+_ZERO_WIDTH_RE = re.compile(r"[\u200b\u200c\u200d\ufeff]")
 
 def _split_tokens(text: str) -> list[str]:
     s = str(text or "")
@@ -65,14 +66,41 @@ def _parse_kv(tok: str) -> tuple[str, str] | None:
     return k, v
 
 
+def _normalize_text(text: str) -> str:
+    s = str(text or "")
+    if not s:
+        return ""
+    s = s.replace("\u00a0", " ")
+    s = _ZERO_WIDTH_RE.sub("", s)
+    s = s.replace("：", ":").replace("／", "/").replace("∕", "/")
+    return s
+
+
+def _normalize_command_prefix(token: str) -> str:
+    s = str(token or "")
+    if s.startswith("::/"):
+        return s
+    if s.startswith("：：/"):
+        return "::/" + s[3:]
+    if s.startswith("::／"):
+        return "::/" + s[3:]
+    if s.startswith("：：／"):
+        return "::/" + s[4:]
+    return s
+
+
 def parse_message_text(text: str) -> Command | None:
-    text = (text or "").strip()
+    text = _normalize_text(text).strip()
     parts0 = _split_tokens(text)
     if not parts0:
         return None
     idx = None
     for i, p in enumerate(parts0):
+        p2 = _normalize_command_prefix(p)
         if p.startswith("/"):
+            idx = i
+            break
+        if p2.startswith("::/") and len(p2) > 3:
             idx = i
             break
     if idx is None:
@@ -80,6 +108,9 @@ def parse_message_text(text: str) -> Command | None:
     parts = parts0[idx:]
     if not parts:
         return None
+    first = _normalize_command_prefix(parts[0])
+    if first.startswith("::/"):
+        parts = [first[2:]] + parts[1:]
 
     head = parts[0].lstrip("/")
     if head in ("help", "h"):

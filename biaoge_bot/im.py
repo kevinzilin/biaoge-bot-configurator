@@ -52,10 +52,18 @@ class IMClient:
     def __init__(self, auth: FeishuAuth) -> None:
         self._auth = auth
 
-    async def _send_message(self, *, chat_id: str, msg_type: str, content: dict[str, Any] | None = None) -> None:
+    async def _send_message(
+        self,
+        *,
+        receive_id_type: str,
+        receive_id: str,
+        msg_type: str,
+        content: dict[str, Any] | None = None,
+    ) -> None:
         token = await self._auth.tenant_token()
-        url = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id"
-        payload: dict[str, Any] = {"receive_id": chat_id, "msg_type": str(msg_type or "").strip()}
+        rid_type = str(receive_id_type or "").strip() or "chat_id"
+        url = f"https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type={rid_type}"
+        payload: dict[str, Any] = {"receive_id": str(receive_id or "").strip(), "msg_type": str(msg_type or "").strip()}
         if payload["msg_type"] in ("text", "interactive"):
             payload["content"] = json.dumps(content or {}, ensure_ascii=False)
         else:
@@ -137,10 +145,16 @@ class IMClient:
             p.write_bytes(r.content)
 
     async def send_text(self, *, chat_id: str, text: str) -> None:
-        await self._send_message(chat_id=chat_id, msg_type="text", content={"text": text})
+        await self._send_message(receive_id_type="chat_id", receive_id=chat_id, msg_type="text", content={"text": text})
+
+    async def send_text_to_open_id(self, *, open_id: str, text: str) -> None:
+        await self._send_message(receive_id_type="open_id", receive_id=open_id, msg_type="text", content={"text": text})
 
     async def send_interactive_card(self, *, chat_id: str, card: dict[str, Any]) -> None:
-        await self._send_message(chat_id=chat_id, msg_type="interactive", content=card)
+        await self._send_message(receive_id_type="chat_id", receive_id=chat_id, msg_type="interactive", content=card)
+
+    async def send_interactive_card_to_open_id(self, *, open_id: str, card: dict[str, Any]) -> None:
+        await self._send_message(receive_id_type="open_id", receive_id=open_id, msg_type="interactive", content=card)
 
     async def upload_image_message(self, *, file_path: str) -> str:
         token = await self._auth.tenant_token()
@@ -165,7 +179,7 @@ class IMClient:
             return key
 
     async def send_image(self, *, chat_id: str, image_key: str) -> None:
-        await self._send_message(chat_id=chat_id, msg_type="image", content={"image_key": image_key})
+        await self._send_message(receive_id_type="chat_id", receive_id=chat_id, msg_type="image", content={"image_key": image_key})
 
     async def upload_file_message(self, *, file_path: str) -> str:
         file_type = _guess_file_type(file_path)
@@ -183,16 +197,16 @@ class IMClient:
         return await self._upload_im_file(file_path=file_path, file_type=file_type, duration_ms=duration_ms)
 
     async def send_file(self, *, chat_id: str, file_key: str) -> None:
-        await self._send_message(chat_id=chat_id, msg_type="file", content={"file_key": file_key})
+        await self._send_message(receive_id_type="chat_id", receive_id=chat_id, msg_type="file", content={"file_key": file_key})
 
     async def send_audio(self, *, chat_id: str, file_key: str) -> None:
-        await self._send_message(chat_id=chat_id, msg_type="audio", content={"file_key": file_key})
+        await self._send_message(receive_id_type="chat_id", receive_id=chat_id, msg_type="audio", content={"file_key": file_key})
 
     async def send_media(self, *, chat_id: str, file_key: str, cover_image_key: str | None = None) -> None:
         content: dict[str, Any] = {"file_key": file_key}
         if isinstance(cover_image_key, str) and cover_image_key.strip():
             content["image_key"] = cover_image_key.strip()
-        await self._send_message(chat_id=chat_id, msg_type="media", content=content)
+        await self._send_message(receive_id_type="chat_id", receive_id=chat_id, msg_type="media", content=content)
 
     async def download_image(self, *, image_key: str, save_path: str, message_id: str | None = None) -> None:
         key = str(image_key or "").strip()

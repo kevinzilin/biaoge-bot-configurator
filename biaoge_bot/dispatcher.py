@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 import httpx
 
@@ -23,6 +24,55 @@ from .runninghub import RunningHubClient
 from .workflows import WorkflowSpec
 
 
+#region debug-point new-pc-generate-fail-dispatcher
+_DBG_DEFAULT_SESSION_ID = "new-pc-generate-fail"
+
+
+def _dbg_load_server_url() -> tuple[str | None, str]:
+    url = str(os.environ.get("DEBUG_SERVER_URL") or "").strip()
+    sid = str(os.environ.get("DEBUG_SESSION_ID") or _DBG_DEFAULT_SESSION_ID).strip() or _DBG_DEFAULT_SESSION_ID
+    if url:
+        return url, sid
+    try:
+        root = Path(__file__).resolve().parent.parent
+        p = root / ".dbg" / f"{sid}.env"
+        if not p.exists():
+            return None, sid
+        for line in p.read_text(encoding="utf-8", errors="ignore").splitlines():
+            s = line.strip()
+            if not s or s.startswith("#") or "=" not in s:
+                continue
+            k, v = s.split("=", 1)
+            if k.strip() == "DEBUG_SERVER_URL" and v.strip():
+                return v.strip(), sid
+    except Exception:
+        return None, sid
+    return None, sid
+
+
+def _dbg_emit(event: str, **fields: Any) -> None:
+    url, sid = _dbg_load_server_url()
+    if not url:
+        return
+    payload = {
+        "ts_ms": int(time.time() * 1000),
+        "sessionId": sid,
+        "runId": str(os.environ.get("DEBUG_RUN_ID") or "pre").strip() or "pre",
+        "event": str(event or "").strip() or "event",
+        "fields": fields,
+    }
+    try:
+        data = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
+        req = Request(url, data=data, headers={"Content-Type": "application/json"})
+        with urlopen(req, timeout=0.8) as resp:
+            resp.read(1)
+    except Exception:
+        return
+
+
+#endregion debug-point new-pc-generate-fail-dispatcher
+
+
 @dataclass(frozen=True)
 class TriggerContext:
     chat_id: str | None
@@ -30,30 +80,100 @@ class TriggerContext:
     source: str
 
 
-def build_panel_card() -> dict[str, Any]:
+def _default_panel_spec() -> dict[str, Any]:
     return {
-        "config": {"wide_screen_mode": True},
-        "header": {"title": {"tag": "plain_text", "content": "ComfyUI 控制面板"}},
-        "elements": [
+        "title": "ComfyUI 控制面板",
+        "rows": [
+            [
+                {"text": "运行默认流程", "type": "primary", "cmd": "run_default", "args": {}},
+                {"text": "执行队列(drain)", "type": "danger", "cmd": "drain", "args": {}},
+            ]
+        ],
+    }
+
+
+def _load_panel_spec_from_config(cfg: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(cfg, dict):
+        return _default_panel_spec()
+    raw = cfg.get("panel")
+    if not isinstance(raw, dict):
+        return _default_panel_spec()
+    title = raw.get("title")
+    title = str(title).strip() if isinstance(title, str) else ""
+    rows0 = raw.get("rows")
+    if not isinstance(rows0, list):
+        return _default_panel_spec()
+
+    rows: list[list[dict[str, Any]]] = []
+    for row in rows0:
+        if not isinstance(row, list):
+            continue
+        out_row: list[dict[str, Any]] = []
+        for btn in row:
+            if not isinstance(btn, dict):
+                continue
+            text = btn.get("text")
+            cmd = btn.get("cmd")
+            if not isinstance(text, str) or not text.strip():
+                continue
+            if not isinstance(cmd, str) or not cmd.strip():
+                continue
+            type0 = btn.get("type")
+            type_s = str(type0).strip().lower() if isinstance(type0, str) else ""
+            if type_s not in ("default", "primary", "danger"):
+                type_s = "default"
+            args0 = btn.get("args")
+            args: dict[str, Any] = args0 if isinstance(args0, dict) else {}
+            out_row.append({"text": text.strip(), "type": type_s, "cmd": cmd.strip(), "args": args})
+        if out_row:
+            rows.append(out_row)
+
+    if not rows:
+        return _default_panel_spec()
+    return {"title": title or _default_panel_spec()["title"], "rows": rows}
+
+
+def build_panel_card(ctx: AppContext | None = None) -> dict[str, Any]:
+    spec = _load_panel_spec_from_config(getattr(ctx, "config", None) if ctx else None)
+    title = str(spec.get("title") or "ComfyUI 控制面板").strip() or "ComfyUI 控制面板"
+    rows = spec.get("rows") if isinstance(spec.get("rows"), list) else []
+
+    elements: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, list):
+            continue
+        actions: list[dict[str, Any]] = []
+        for btn in row:
+            if not isinstance(btn, dict):
+                continue
+            text = str(btn.get("text") or "").strip()
+            cmd = str(btn.get("cmd") or "").strip()
+            if not text or not cmd:
+                continue
+            type_s = str(btn.get("type") or "default").strip().lower()
+            if type_s not in ("default", "primary", "danger"):
+                type_s = "default"
+            args0 = btn.get("args")
+            args = args0 if isinstance(args0, dict) else {}
+            value: dict[str, Any] = {"cmd": cmd}
+            if args:
+                value["args"] = args
+            actions.append({"tag": "button", "text": {"tag": "plain_text", "content": text}, "type": type_s, "value": value})
+        if actions:
+            elements.append({"tag": "action", "actions": actions})
+
+    if not elements:
+        elements = [
             {
                 "tag": "action",
                 "actions": [
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "运行默认流程"},
-                        "type": "primary",
-                        "value": {"cmd": "run_default"},
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "执行队列(drain)"},
-                        "type": "danger",
-                        "value": {"cmd": "drain"},
-                    },
+                    {"tag": "button", "text": {"tag": "plain_text", "content": "运行默认流程"}, "type": "primary", "value": {"cmd": "run_default"}},
+                    {"tag": "button", "text": {"tag": "plain_text", "content": "执行队列(drain)"}, "type": "danger", "value": {"cmd": "drain"}},
                 ],
             }
-        ],
-    }
+        ]
+
+    return {"config": {"wide_screen_mode": True}, "header": {"title": {"tag": "plain_text", "content": title}}, "elements": elements}
 
 
 def _pick_record_id(args: dict[str, Any]) -> str | None:
@@ -205,30 +325,48 @@ def _b64url_json_decode(data: str) -> dict[str, Any] | None:
 
 
 async def handle_help(im: IMClient, chat_id: str) -> None:
-    await im.send_text(
-        chat_id=chat_id,
-        text=(
-            "指令说明：\n"
-            "/panel  —— 打开控制面板\n"
-            "/run_default  —— 运行默认工作流\n"
-            "/run record=recxxxx seed=1 steps=30 prompt=...  —— 指定记录 ID 运行默认工作流，并支持参数覆盖\n"
-            "/run row=6 seed=1 steps=30 prompt=...  —— 指定行号运行默认工作流，并支持参数覆盖\n"
-            "/wf <workflow> record=recxxxx seed=1 steps=30 prompt=...  —— 指定工作流和记录 ID 运行\n"
-            "/wf <workflow> row=6 seed=1 steps=30 prompt=...  —— 指定工作流和行号运行\n"
-            "/wf <workflow> row=6 view=vewxxxx  —— 指定工作流、视图及行号运行\n"
-            "/wf <workflow> 3.seed=1 10.text=hello  —— 指定工作流运行并直接覆盖节点参数\n"
-            "/wf <workflow> images=@E:\\\\pics\\\\a.jpg  —— 本机文件上传后再执行（支持用引号包住带空格的路径）\n"
-            "/batch <workflow> table=face_table batch=10 inflight=1  —— 批量运行指定数量的任务\n"
-            "/drain <workflow> table=face_table batch=10 inflight=1  —— 持续处理队列直到耗尽\n"
-            "/stop_queue <workflow> table=face_table  —— 停止当前的批量/队列任务\n"
-        ),
+    await im.send_text(chat_id=chat_id, text=get_help_text())
+
+
+def get_help_text() -> str:
+    return (
+        "指令说明：\n"
+        "/panel  —— 打开控制面板\n"
+        "/run_default  —— 运行默认工作流\n"
+        "/run record=recxxxx seed=1 steps=30 prompt=...  —— 指定记录 ID 运行默认工作流，并支持参数覆盖\n"
+        "/run row=6 seed=1 steps=30 prompt=...  —— 指定行号运行默认工作流，并支持参数覆盖\n"
+        "/wf <workflow> record=recxxxx seed=1 steps=30 prompt=...  —— 指定工作流和记录 ID 运行\n"
+        "/wf <workflow> row=6 seed=1 steps=30 prompt=...  —— 指定工作流和行号运行\n"
+        "/wf <workflow> row=6 view=vewxxxx  —— 指定工作流、视图及行号运行\n"
+        "/wf <workflow> 3.seed=1 10.text=hello  —— 指定工作流运行并直接覆盖节点参数\n"
+        "/wf <workflow> images=@E:\\\\pics\\\\a.jpg  —— 本机文件上传后再执行（支持用引号包住带空格的路径）\n"
+        "/batch <workflow> table=face_table batch=10 inflight=1  —— 批量运行指定数量的任务\n"
+        "/drain <workflow> table=face_table batch=10 inflight=1  —— 持续处理队列直到耗尽\n"
+        "/stop_queue <workflow> table=face_table  —— 停止当前的批量/队列任务\n"
     )
 
 
-async def _send_license_guidance(im: IMClient, chat_id: str) -> None:
+async def _send_text_by_trigger(im: IMClient, trigger: TriggerContext, text: str) -> None:
+    if trigger.chat_id:
+        await im.send_text(chat_id=trigger.chat_id, text=text)
+        return
+    if trigger.user_open_id:
+        await im.send_text_to_open_id(open_id=trigger.user_open_id, text=text)
+
+
+async def _send_card_by_trigger(im: IMClient, trigger: TriggerContext, card: dict[str, Any]) -> None:
+    if trigger.chat_id:
+        await im.send_interactive_card(chat_id=trigger.chat_id, card=card)
+        return
+    if trigger.user_open_id:
+        await im.send_interactive_card_to_open_id(open_id=trigger.user_open_id, card=card)
+
+
+async def _send_license_guidance(im: IMClient, trigger: TriggerContext) -> None:
     lic = check_license()
-    await im.send_text(
-        chat_id=chat_id,
+    await _send_text_by_trigger(
+        im,
+        trigger,
         text=(
             "未检测到有效授权，已禁用 Bitable/Drive。\n"
             f"设备码: {lic.device_code}\n"
@@ -1622,6 +1760,19 @@ async def run_workflow(
                 workflow_id = str(rh.get("workflowId") or cfg_for_wf.get("workflowId") or "").strip()
                 if not workflow_id:
                     raise RuntimeError("missing runninghub workflowId")
+                _dbg_emit(
+                    "dispatcher.runninghub.create_task.start",
+                    record_id=record_id,
+                    workflow_key=workflow_key,
+                    table_key=resolved_table_key,
+                    mode=mode,
+                    has_webhook=bool(webhook_url),
+                    workflow_id=workflow_id,
+                    node_info_len=len(node_info_list) if isinstance(node_info_list, list) else None,
+                    split_active=split_active,
+                    split_group=split_group,
+                    split_index=idx,
+                )
                 created = await runninghub_client.create_task(
                     workflow_id=workflow_id,
                     node_info_list=node_info_list,
@@ -1634,6 +1785,22 @@ async def run_workflow(
                     access_password=rh.get("accessPassword"),
                 )
                 prompt_id = created.task_id
+                _dbg_emit(
+                    "dispatcher.runninghub.create_task.done",
+                    record_id=record_id,
+                    workflow_key=workflow_key,
+                    table_key=resolved_table_key,
+                    prompt_id=prompt_id,
+                    raw_keys=sorted([str(k) for k in (created.raw or {}).keys()])[:40] if isinstance(created.raw, dict) else None,
+                )
+                if not prompt_id:
+                    _dbg_emit(
+                        "dispatcher.runninghub.task_id_missing",
+                        record_id=record_id,
+                        workflow_key=workflow_key,
+                        table_key=resolved_table_key,
+                        raw=created.raw if isinstance(created.raw, dict) else None,
+                    )
             else:
                 prompt_id = await queue_by_workflowprompt(
                     comfyui_client,
@@ -1720,6 +1887,7 @@ async def run_workflow(
                             table_key=resolved_table_key,
                             workflow_key=workflow_key,
                             chat_id=trigger.chat_id,
+                            user_open_id=trigger.user_open_id,
                             run_log_table_key=run_log_table_key,
                             run_log_record_id=run_log_record_id,
                             run_log_submitted_at_ms=run_log_submitted_at_ms,
@@ -2202,25 +2370,21 @@ async def dispatch(ctx: AppContext, *, name: str, args: dict[str, Any], trigger:
     im = IMClient(ctx.auth)
 
     if name in ("help", "h"):
-        if trigger.chat_id:
-            await handle_help(im, trigger.chat_id)
+        await _send_text_by_trigger(im, trigger, get_help_text())
         return
 
     if name == "ids":
-        if trigger.chat_id:
-            chat_id = str(trigger.chat_id or "")
-            user_open_id = str(trigger.user_open_id or "")
-            await im.send_text(chat_id=trigger.chat_id, text=f"chat_id={chat_id}\nuser_open_id={user_open_id}")
+        chat_id = str(trigger.chat_id or "")
+        user_open_id = str(trigger.user_open_id or "")
+        await _send_text_by_trigger(im, trigger, f"chat_id={chat_id}\nuser_open_id={user_open_id}")
         return
 
     if name == "botid":
-        if not trigger.chat_id:
-            return
         token = ""
         try:
             token = await ctx.auth.tenant_token()
         except Exception as e:
-            await im.send_text(chat_id=trigger.chat_id, text=f"bot_id error: {e}")
+            await _send_text_by_trigger(im, trigger, f"bot_id error: {e}")
             return
         try:
             async with httpx.AsyncClient(timeout=10) as client:
@@ -2231,7 +2395,7 @@ async def dispatch(ctx: AppContext, *, name: str, args: dict[str, Any], trigger:
                 r.raise_for_status()
                 data = r.json()
         except Exception as e:
-            await im.send_text(chat_id=trigger.chat_id, text=f"bot_id error: {e}")
+            await _send_text_by_trigger(im, trigger, f"bot_id error: {e}")
             return
         bot_open_id = None
         try:
@@ -2253,16 +2417,16 @@ async def dispatch(ctx: AppContext, *, name: str, args: dict[str, Any], trigger:
         except Exception:
             bot_open_id = None
         if bot_open_id:
-            await im.send_text(chat_id=trigger.chat_id, text=f"bot_open_id={bot_open_id}")
+            await _send_text_by_trigger(im, trigger, f"bot_open_id={bot_open_id}")
         else:
-            await im.send_text(chat_id=trigger.chat_id, text=f"bot_open_id not found: {data}")
+            await _send_text_by_trigger(im, trigger, f"bot_open_id not found: {data}")
         return
 
     if name == "cb":
         sig = str(args.get("sig") or args.get("token") or "").strip()
         if ctx.settings.cb_message_token and sig != ctx.settings.cb_message_token:
             if trigger.chat_id:
-                await im.send_text(chat_id=trigger.chat_id, text="cb token mismatch")
+                await _send_text_by_trigger(im, trigger, "cb token mismatch")
             return
         payload: dict[str, Any] | None = None
         raw_data = str(args.get("data") or "").strip()
@@ -2270,7 +2434,7 @@ async def dispatch(ctx: AppContext, *, name: str, args: dict[str, Any], trigger:
             payload = _b64url_json_decode(raw_data)
             if not payload:
                 if trigger.chat_id:
-                    await im.send_text(chat_id=trigger.chat_id, text="cb invalid data")
+                    await _send_text_by_trigger(im, trigger, "cb invalid data")
                 return
         else:
             provider = str(args.get("provider") or args.get("p") or "comfyui").strip().lower()
@@ -2278,7 +2442,7 @@ async def dispatch(ctx: AppContext, *, name: str, args: dict[str, Any], trigger:
             pid = str(pid).strip() if isinstance(pid, (str, int)) else ""
             if not pid:
                 if trigger.chat_id:
-                    await im.send_text(chat_id=trigger.chat_id, text="cb missing id")
+                    await _send_text_by_trigger(im, trigger, "cb missing id")
                 return
             payload = {"provider": provider, "prompt_id": pid, "completed": True}
             if provider == "runninghub":
@@ -2287,7 +2451,7 @@ async def dispatch(ctx: AppContext, *, name: str, args: dict[str, Any], trigger:
                     q = await cli.query_results_v2(task_id=pid)
                 except Exception as e:
                     if trigger.chat_id:
-                        await im.send_text(chat_id=trigger.chat_id, text=f"cb runninghub query error: {e}")
+                        await _send_text_by_trigger(im, trigger, f"cb runninghub query error: {e}")
                     return
                 st = (q.status or "").strip().upper()
                 if st in ("SUCCESS", "SUCCEEDED", "OK"):
@@ -2315,7 +2479,7 @@ async def dispatch(ctx: AppContext, *, name: str, args: dict[str, Any], trigger:
                     payload["files"] = files
                 if payload.get("completed") is False:
                     if trigger.chat_id:
-                        await im.send_text(chat_id=trigger.chat_id, text=f"cb still running: {pid}")
+                        await _send_text_by_trigger(im, trigger, f"cb still running: {pid}")
                     return
         prompt_id = payload.get("prompt_id") or payload.get("promptId")
         prompt_id = str(prompt_id).strip() if isinstance(prompt_id, str) else ""
@@ -2326,17 +2490,16 @@ async def dispatch(ctx: AppContext, *, name: str, args: dict[str, Any], trigger:
                 payload["context"] = ctx0
             if not isinstance(ctx0.get("chat_id"), str):
                 ctx0["chat_id"] = trigger.chat_id
-            await im.send_text(chat_id=trigger.chat_id, text=f"cb received{(' prompt=' + prompt_id) if prompt_id else ''}")
+            await _send_text_by_trigger(im, trigger, f"cb received{(' prompt=' + prompt_id) if prompt_id else ''}")
         try:
             await handle_callback_payload(ctx, payload)
         except Exception as e:
             if trigger.chat_id:
-                await im.send_text(chat_id=trigger.chat_id, text=f"cb error: {e}")
+                await _send_text_by_trigger(im, trigger, f"cb error: {e}")
         return
 
     if name == "panel":
-        if trigger.chat_id:
-            await im.send_interactive_card(chat_id=trigger.chat_id, card=build_panel_card())
+        await _send_card_by_trigger(im, trigger, build_panel_card(ctx))
         return
 
     if name in ("reset", "reset_table"):
@@ -2347,16 +2510,16 @@ async def dispatch(ctx: AppContext, *, name: str, args: dict[str, Any], trigger:
                 if (not ctx.bitable_mode.read_enabled) and ctx.bitable_configs and (ctx.settings.bitable_mode or "").strip().lower() not in ("off", "none", "disable", "disabled"):
                     await _send_license_guidance(im, trigger.chat_id)
                 else:
-                    await im.send_text(chat_id=trigger.chat_id, text="缺少 table 或 table 不存在")
+                    await _send_text_by_trigger(im, trigger, "缺少 table 或 table 不存在")
             return
         scope = str(args.get("scope") or "all_nonqueued").strip()
         clear = str(args.get("clear") or "").strip().lower() in ("1", "true", "yes", "y", "on")
         n, cp, ce, co, fc, sp, se, so = await _reset_table_records(bitable, scope=scope, clear=clear)
         if trigger.chat_id:
             if clear:
-                await im.send_text(chat_id=trigger.chat_id, text=f"已重置: {n} 清空(任务ID:{cp} 错误:{ce} 结果:{co} 失败:{fc} 不可写:任务ID:{sp} 错误:{se} 结果:{so})")
+                await _send_text_by_trigger(im, trigger, f"已重置: {n} 清空(任务ID:{cp} 错误:{ce} 结果:{co} 失败:{fc} 不可写:任务ID:{sp} 错误:{se} 结果:{so})")
             else:
-                await im.send_text(chat_id=trigger.chat_id, text=f"已重置: {n}")
+                await _send_text_by_trigger(im, trigger, f"已重置: {n}")
         return
 
     if name == "run_default":
@@ -2366,10 +2529,12 @@ async def dispatch(ctx: AppContext, *, name: str, args: dict[str, Any], trigger:
         
         if bitable and bitable.mode.read_enabled:
             record_id = await bitable.find_next_queued_record_id()
+            if not record_id:
+                await _send_text_by_trigger(im, trigger, "队列为空：未找到 queued 任务")
+                return
         workflow_key = _pick_default_workflow_key(ctx, table_key=default_table_key)
         if not workflow_key:
-            if trigger.chat_id:
-                await im.send_text(chat_id=trigger.chat_id, text="未找到默认工作流配置")
+            await _send_text_by_trigger(im, trigger, "未找到默认工作流配置")
             return
                 
         prompt_id = await run_workflow(
@@ -2382,8 +2547,7 @@ async def dispatch(ctx: AppContext, *, name: str, args: dict[str, Any], trigger:
             params={},
             table_key=default_table_key,
         )
-        if trigger.chat_id:
-            await im.send_text(chat_id=trigger.chat_id, text=f"已入队: {prompt_id or 'unknown'}")
+        await _send_text_by_trigger(im, trigger, f"已入队: {prompt_id or 'unknown'}")
         return
 
     if name in ("run", "wf"):
@@ -2395,7 +2559,7 @@ async def dispatch(ctx: AppContext, *, name: str, args: dict[str, Any], trigger:
         workflow_key = str(workflow_key) if workflow_key else "default"
 
         if row and trigger.chat_id and (not ctx.bitable_mode.read_enabled) and ctx.bitable_configs and (ctx.settings.bitable_mode or "").strip().lower() not in ("off", "none", "disable", "disabled"):
-            await _send_license_guidance(im, trigger.chat_id)
+            await _send_license_guidance(im, trigger)
             return
         
         if workflow_key == "default" and not ctx.workflows.get("default"):
@@ -2422,8 +2586,7 @@ async def dispatch(ctx: AppContext, *, name: str, args: dict[str, Any], trigger:
             params=params,
             table_key=table_key,
         )
-        if trigger.chat_id:
-            await im.send_text(chat_id=trigger.chat_id, text=f"已入队: {prompt_id or 'unknown'}")
+        await _send_text_by_trigger(im, trigger, f"已入队: {prompt_id or 'unknown'}")
         return
 
     if name in ("batch", "drain"):
@@ -2435,13 +2598,13 @@ async def dispatch(ctx: AppContext, *, name: str, args: dict[str, Any], trigger:
         
         if not workflow_key or (workflow_key == "default" and not ctx.workflows.get("default")):
             if trigger.chat_id:
-                await im.send_text(chat_id=trigger.chat_id, text="缺少 workflow 且未找到默认工作流配置")
+                await _send_text_by_trigger(im, trigger, "缺少 workflow 且未找到默认工作流配置")
             return
             
         table_key = _pick_table_key_for_workflow(ctx, args=args, workflow_key=workflow_key)
         if not table_key:
             if trigger.chat_id:
-                await im.send_text(chat_id=trigger.chat_id, text="缺少 table")
+                await _send_text_by_trigger(im, trigger, "缺少 table")
             return
             
         batch = int(str(args.get("batch") or args.get("limit") or "10"))
@@ -2451,12 +2614,12 @@ async def dispatch(ctx: AppContext, *, name: str, args: dict[str, Any], trigger:
         if bitable is None or not bitable.mode.read_enabled:
             if trigger.chat_id:
                 if (not ctx.bitable_mode.read_enabled) and ctx.bitable_configs and (ctx.settings.bitable_mode or "").strip().lower() not in ("off", "none", "disable", "disabled"):
-                    await _send_license_guidance(im, trigger.chat_id)
+                    await _send_license_guidance(im, trigger)
                 else:
-                    await im.send_text(chat_id=trigger.chat_id, text="无法读取表格，无法执行批量(batch/drain)操作。")
+                    await _send_text_by_trigger(im, trigger, "无法读取表格，无法执行批量(batch/drain)操作。")
             return
         if trigger.chat_id:
-            await im.send_text(chat_id=trigger.chat_id, text=f"已启动队列: {workflow_key} table={table_key}")
+            await _send_text_by_trigger(im, trigger, f"已启动队列: {workflow_key} table={table_key}")
         try:
             await ctx.runner.start(
                 workflow_key=workflow_key,
@@ -2468,7 +2631,7 @@ async def dispatch(ctx: AppContext, *, name: str, args: dict[str, Any], trigger:
             )
         except Exception as e:
             if trigger.chat_id:
-                await im.send_text(chat_id=trigger.chat_id, text=f"队列启动失败: {e}")
+                await _send_text_by_trigger(im, trigger, f"队列启动失败: {e}")
         return
 
     if name == "stop_queue":
@@ -2482,11 +2645,10 @@ async def dispatch(ctx: AppContext, *, name: str, args: dict[str, Any], trigger:
         if workflow_key and table_key:
             await ctx.runner.stop(workflow_key=workflow_key, table_key=table_key)
             if trigger.chat_id:
-                await im.send_text(chat_id=trigger.chat_id, text=f"已停止队列: {workflow_key} table={table_key}")
+                await _send_text_by_trigger(im, trigger, f"已停止队列: {workflow_key} table={table_key}")
         return
 
-    if trigger.chat_id:
-        await im.send_text(chat_id=trigger.chat_id, text=f"未知指令: {name}")
+    await _send_text_by_trigger(im, trigger, f"未知指令: {name}")
 
 
 def dispatch_in_thread(ctx: AppContext, *, name: str, args: dict[str, Any], trigger: TriggerContext) -> None:
@@ -2494,8 +2656,11 @@ def dispatch_in_thread(ctx: AppContext, *, name: str, args: dict[str, Any], trig
         asyncio.run(dispatch(ctx, name=name, args=args, trigger=trigger))
     except Exception as e:
         logging.exception("dispatch failed: %s", e)
-        if trigger.chat_id:
-            try:
-                asyncio.run(IMClient(ctx.auth).send_text(chat_id=trigger.chat_id, text=f"执行失败: {e}"))
-            except Exception:
-                pass
+        try:
+            im = IMClient(ctx.auth)
+            if trigger.chat_id:
+                asyncio.run(im.send_text(chat_id=trigger.chat_id, text=f"执行失败: {e}"))
+            elif trigger.user_open_id:
+                asyncio.run(im.send_text_to_open_id(open_id=trigger.user_open_id, text=f"执行失败: {e}"))
+        except Exception:
+            pass

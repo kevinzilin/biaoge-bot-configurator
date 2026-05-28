@@ -624,6 +624,23 @@ async def _update_split_progress_and_maybe_finalize(
 def create_callback_app(ctx: AppContext) -> FastAPI:
     app = FastAPI()
 
+    def _extract_token(req: Request, payload: dict[str, Any]) -> str:
+        q = req.query_params.get("token") or req.query_params.get("sig") or ""
+        if isinstance(q, str) and q.strip():
+            return q.strip()
+        for k in ("token", "sig", "signature"):
+            v = payload.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        return ""
+
+    def _check_token(req: Request, payload: dict[str, Any]) -> bool:
+        expected = str(ctx.settings.cb_message_token or "").strip()
+        if not expected:
+            return True
+        got = _extract_token(req, payload)
+        return bool(got and got == expected)
+
     @app.post(ctx.settings.callback_path)
     async def callback(req: Request) -> dict[str, Any]:
         payload = await req.json()
@@ -632,7 +649,7 @@ def create_callback_app(ctx: AppContext) -> FastAPI:
     @app.post("/_local/exec")
     async def local_exec(payload: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
         from .commands import parse_message_text
-        from .dispatcher import TriggerContext, build_panel_card, run_workflow, _reset_table_records
+        from .dispatcher import TriggerContext, build_panel_card, get_help_text, run_workflow, _reset_table_records
 
         text = payload.get("text")
         if not isinstance(text, str) or not text.strip():
@@ -646,10 +663,10 @@ def create_callback_app(ctx: AppContext) -> FastAPI:
         trig = TriggerContext(chat_id=None, user_open_id=None, source="local.exec")
 
         if name == "panel":
-            return {"ok": True, "card": build_panel_card()}
+            return {"ok": True, "card": build_panel_card(ctx)}
 
         if name in ("help", "h"):
-            return {"ok": True, "help": "Check IM for help message."}
+            return {"ok": True, "text": get_help_text()}
 
         if name in ("reset", "reset_table"):
             table_key = str(args.get("table") or args.get("tableKey") or args.get("table_key") or ctx.default_table_key or "")
@@ -851,6 +868,40 @@ def create_callback_app(ctx: AppContext) -> FastAPI:
             return {"ok": False, "error": "missing workflow/table"}
 
         return {"ok": False, "error": f"unsupported command: {name}"}
+
+    @app.post("/_event/exec")
+    async def event_exec(req: Request, payload: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
+        if not _check_token(req, payload):
+            return {"ok": False, "error": "invalid token"}
+
+        text = payload.get("text")
+        if isinstance(text, str) and text.strip():
+            return await local_exec({"text": text.strip()})
+
+        ev = None
+        for k in ("event_id", "eventId", "event", "eventKey", "EventKey", "key", "id"):
+            v = payload.get(k)
+            if isinstance(v, str) and v.strip():
+                ev = v.strip()
+                break
+        if not ev:
+            return {"ok": False, "error": "missing event_id"}
+
+        if ev.startswith("cmd_"):
+            ev = ev[4:].strip()
+        if ev.startswith("/"):
+            return await local_exec({"text": ev})
+        if "__" in ev:
+            parts = [p for p in ev.split("__") if p]
+            if parts:
+                cmd_text = "/" + parts[0] + ((" " + " ".join(parts[1:])) if len(parts) > 1 else "")
+                return await local_exec({"text": cmd_text})
+        if ":" in ev:
+            parts2 = [p for p in ev.split(":") if p]
+            if parts2:
+                cmd_text2 = "/" + parts2[0] + ((" " + " ".join(parts2[1:])) if len(parts2) > 1 else "")
+                return await local_exec({"text": cmd_text2})
+        return await local_exec({"text": f"/{ev}"})
 
     @app.get("/_local/bitable/fields")
     async def local_bitable_fields(table: str | None = None) -> dict[str, Any]:
@@ -1164,6 +1215,7 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
 
     table_key = _resolve_table_key(ctx, cb_ctx)
     chat_id = cb_ctx.get("chat_id")
+    user_open_id = cb_ctx.get("user_open_id") or cb_ctx.get("userOpenId")
     workflow_name = cb_ctx.get("workflow")
     run_log_table_key = cb_ctx.get("runLogTableKey") or cb_ctx.get("run_log_table_key")
     run_log_record_id = cb_ctx.get("runLogRecordId") or cb_ctx.get("run_log_record_id")
@@ -1187,6 +1239,9 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
             if not chat_id:
                 cid = resolved.get("chat_id")
                 chat_id = str(cid) if cid else chat_id
+            if not user_open_id:
+                uoid = resolved.get("user_open_id")
+                user_open_id = str(uoid) if uoid else user_open_id
             if not run_log_table_key:
                 tlk = resolved.get("run_log_table_key")
                 run_log_table_key = str(tlk) if tlk else run_log_table_key
@@ -1506,11 +1561,15 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
         except Exception:
             split_summary = None
 
-    if writeback_errors and isinstance(chat_id, str) and chat_id and not (isinstance(cb_ctx, dict) and cb_ctx.get("split_group")):
+    if writeback_errors and not (isinstance(cb_ctx, dict) and cb_ctx.get("split_group")):
         try:
             tip = writeback_errors[0]
             extra = f"（另有 {len(writeback_errors) - 1} 个回写/上传错误）" if len(writeback_errors) > 1 else ""
-            await IMClient(ctx.auth).send_text(chat_id=chat_id, text=f"飞书回写/上传失败{extra}：{tip}")
+            im0 = IMClient(ctx.auth)
+            if isinstance(chat_id, str) and chat_id:
+                await im0.send_text(chat_id=chat_id, text=f"飞书回写/上传失败{extra}：{tip}")
+            elif isinstance(user_open_id, str) and user_open_id:
+                await im0.send_text_to_open_id(open_id=user_open_id, text=f"飞书回写/上传失败{extra}：{tip}")
         except Exception:
             pass
 
@@ -1520,7 +1579,17 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
         except Exception:
             pass
 
-    if isinstance(chat_id, str) and chat_id:
+    target_chat_id = str(chat_id or "").strip()
+    target_open_id = str(user_open_id or "").strip()
+
+    async def _notify_text(im: IMClient, text: str) -> None:
+        if target_chat_id:
+            await im.send_text(chat_id=target_chat_id, text=text)
+            return
+        if target_open_id:
+            await im.send_text_to_open_id(open_id=target_open_id, text=text)
+
+    if target_chat_id or target_open_id:
         im = IMClient(ctx.auth)
         rid0 = str(record_id or "").strip()
         split_group = str((cb_ctx or {}).get("split_group") or "").strip() if isinstance(cb_ctx, dict) else ""
@@ -1555,16 +1624,16 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
                         if len(tip) > 200:
                             tip = tip[:200] + "..."
                         msg_lines.append(f"回写提示：{tip}")
-                await im.send_text(chat_id=chat_id, text="\n".join([x for x in msg_lines if x]))
+                await _notify_text(im, "\n".join([x for x in msg_lines if x]))
 
                 if isinstance(split_summary, dict) and bool(split_summary.get("final")):
                     total2 = int(split_summary.get("total") or 0)
                     done2 = int(split_summary.get("done") or 0)
                     failed2 = int(split_summary.get("failed") or 0)
                     succ2 = max(0, done2 - failed2)
-                    await im.send_text(chat_id=chat_id, text=f"批次完成 record={record_id}：成功{succ2}，失败{failed2}，共{total2}")
+                    await _notify_text(im, f"批次完成 record={record_id}：成功{succ2}，失败{failed2}，共{total2}")
             else:
-                await im.send_text(chat_id=chat_id, text=("已完成" if ok else "失败") + f" record={record_id}")
+                await _notify_text(im, ("已完成" if ok else "失败") + f" record={record_id}")
         elif file_paths:
             sent_any = False
             last_send_err: str | None = None
@@ -1575,23 +1644,25 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
                 size = os.path.getsize(fp) if fp and os.path.exists(fp) else 0
                 if size <= 0:
                     raise RuntimeError("file not found or empty")
+                if not target_chat_id:
+                    return False
                 if ext == "mp4" and size <= 30 * 1024 * 1024:
                     try:
                         k = await im.upload_video_message(file_path=fp, duration_ms=None)
-                        await im.send_media(chat_id=chat_id, file_key=k)
+                        await im.send_media(chat_id=target_chat_id, file_key=k)
                         return True
                     except Exception as e:
                         last_send_err = str(e)
                 if ext in {"png", "jpg", "jpeg", "webp", "gif", "bmp"} and size <= 10 * 1024 * 1024:
                     try:
                         k = await im.upload_image_message(file_path=fp)
-                        await im.send_image(chat_id=chat_id, image_key=k)
+                        await im.send_image(chat_id=target_chat_id, image_key=k)
                         return True
                     except Exception as e:
                         last_send_err = str(e)
                 if size <= 30 * 1024 * 1024:
                     k = await im.upload_file_message(file_path=fp)
-                    await im.send_file(chat_id=chat_id, file_key=k)
+                    await im.send_file(chat_id=target_chat_id, file_key=k)
                     return True
                 raise RuntimeError("file too large to upload via im api")
 
@@ -1607,18 +1678,18 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
                     lines = list(result_urls)
                     if last_send_err:
                         lines.append(f"（补充：发送预览失败，原因：{last_send_err}）")
-                    await im.send_text(chat_id=chat_id, text="\n".join(lines))
+                    await _notify_text(im, "\n".join(lines))
                 else:
                     text0 = ("已完成" if ok else "失败") + (f" prompt={prompt_id}" if prompt_id else "")
                     if last_send_err:
                         text0 = text0 + f"\n（补充：发送预览失败，原因：{last_send_err}）"
-                    await im.send_text(chat_id=chat_id, text=text0)
+                    await _notify_text(im, text0)
         elif result_urls:
             lines = [("已完成" if ok else "失败") + (f" prompt={prompt_id}" if prompt_id else "")]
             lines.extend(result_urls)
-            await im.send_text(chat_id=chat_id, text="\n".join(lines))
+            await _notify_text(im, "\n".join(lines))
         elif prompt_id:
-            await im.send_text(chat_id=chat_id, text=("已完成" if ok else "失败") + f" prompt={prompt_id}")
+            await _notify_text(im, ("已完成" if ok else "失败") + f" prompt={prompt_id}")
 
     for fp in file_paths:
         try:

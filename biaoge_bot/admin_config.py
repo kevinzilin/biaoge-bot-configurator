@@ -343,6 +343,13 @@ _PAGE_HTML = r"""
     td { color: rgba(229,231,235,0.92); overflow-wrap: anywhere; word-break: break-word; }
     .kvWrap { display:grid; gap: 8px; }
     .kvActions { display:flex; gap: 10px; }
+    .panelRows { display:grid; gap: 14px; margin-top: 12px; }
+    .panelBtnList { display:grid; gap: 12px; }
+    .panelBtnGrid { display:grid; grid-template-columns: 1fr 1.1fr 120px 90px; gap: 10px; align-items: center; }
+    .panelBtnHeader { padding: 8px 10px; border-radius: 12px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.10); }
+    .panelBtnHeader > div { font-size: 12px; color: rgba(229,231,235,0.90); font-weight: 650; }
+    .panelBtnCard { border: 1px solid rgba(255,255,255,0.14); border-radius: 14px; padding: 10px; background: rgba(255,255,255,0.04); display:grid; gap: 10px; }
+    @media (max-width: 980px) { .panelBtnGrid { grid-template-columns: 1fr; } }
     .bitableOnly { }
     .block {
       border: 1px solid rgba(255,255,255,0.12);
@@ -426,6 +433,11 @@ _PAGE_HTML = r"""
           <span class="muted" id="envCount"></span>
         </div>
         <div id="envList" class="sideList"></div>
+
+        <div class="sideTitle" style="margin-top:14px">
+          <h2>global</h2>
+        </div>
+        <div id="globalList" class="sideList"></div>
 
         <div class="sideTitle bitableOnly" id="tablesTitle" style="margin-top:14px">
           <h2>tables</h2>
@@ -527,7 +539,7 @@ _PAGE_HTML = r"""
     return JSON.parse(JSON.stringify(v || {}));
   }
 
-  function kvEditor(initial, keyPlaceholder, valuePlaceholder) {
+  function kvEditor(initial, keyPlaceholder, valuePlaceholder, addText) {
     const wrap = el("div", {class:"kvWrap"});
     const table = el("table");
     const thead = el("thead", null, [el("tr", null, [
@@ -560,7 +572,7 @@ _PAGE_HTML = r"""
       addRow("", "");
     }
 
-    const addBtn = el("button", {type:"button", text:"新增一行", class:"btnGhost"});
+    const addBtn = el("button", {type:"button", text:(addText || "新增一行"), class:"btnGhost"});
     addBtn.onclick = () => addRow("", "");
     wrap.appendChild(table);
     wrap.appendChild(el("div", {class:"kvActions"}, [addBtn]));
@@ -783,6 +795,25 @@ _PAGE_HTML = r"""
       envList.appendChild(item);
     }
 
+    const globalList = $("globalList");
+    globalList.innerHTML = "";
+    {
+      const active = STATE.selected.type === "global";
+      const item = el("button", {type:"button", class:"sideItem" + (active ? " active" : "")}, [
+        el("div", {class:"sideKey", text:"default_table / default_workflow"}),
+      ]);
+      item.onclick = () => select("global", "root");
+      globalList.appendChild(item);
+    }
+    {
+      const active = STATE.selected.type === "panel";
+      const item = el("button", {type:"button", class:"sideItem" + (active ? " active" : "")}, [
+        el("div", {class:"sideKey", text:"panel"}),
+      ]);
+      item.onclick = () => select("panel", "root");
+      globalList.appendChild(item);
+    }
+
     const tables = (STATE.cfg && STATE.cfg.tables) ? STATE.cfg.tables : {};
     const tableList = $("tableList");
     tableList.innerHTML = "";
@@ -814,6 +845,172 @@ _PAGE_HTML = r"""
     root.innerHTML = "";
     const t = STATE.selected.type;
     const key = STATE.selected.key;
+
+    if (t === "global") {
+      const tables = (STATE.cfg && STATE.cfg.tables) ? STATE.cfg.tables : {};
+      const wfs = (STATE.cfg && STATE.cfg.workflows) ? STATE.cfg.workflows : {};
+      const currentDefaultTable = String((STATE.cfg && (STATE.cfg.default_table || STATE.cfg.defaultTable)) || "");
+      const currentDefaultWorkflow = String((STATE.cfg && (STATE.cfg.default_workflow || STATE.cfg.defaultWorkflow)) || "");
+
+      const defaultTable = el("input", {type:"text", value: currentDefaultTable});
+      const defaultWorkflow = el("input", {type:"text", value: currentDefaultWorkflow});
+
+      const tableDataListId = "dl_default_table";
+      const wfDataListId = "dl_default_workflow";
+      defaultTable.setAttribute("list", tableDataListId);
+      defaultWorkflow.setAttribute("list", wfDataListId);
+
+      const dlTable = el("datalist", {id: tableDataListId}, Object.keys(tables || {}).sort().map(k2 => el("option", {value: k2})));
+      const dlWf = el("datalist", {id: wfDataListId}, Object.keys(wfs || {}).sort().map(k2 => el("option", {value: k2})));
+
+      root.appendChild(el("div", {class:"sectionHeader"}, [
+        el("div", null, [el("h2", {text:"global"}), el("div", {class:"help", text:"配置默认表格与默认工作流。它们会影响 /run_default、以及未指定 table/workflow 的情况。"})]),
+      ]));
+
+      root.appendChild(el("div", {class:"form"}, [
+        el("div", {class:"field"}, [el("div", {class:"label", text:"default_table"}), defaultTable, el("div", {class:"help", text:"默认表格 key（对应 tables）。"})]),
+        el("div", {class:"field"}, [el("div", {class:"label", text:"default_workflow"}), defaultWorkflow, el("div", {class:"help", text:"默认工作流 key（对应 workflows）。"})]),
+      ]));
+
+      root.appendChild(dlTable);
+      root.appendChild(dlWf);
+
+      CURRENT = {
+        commit: () => {
+          const dt = (defaultTable.value || "").trim();
+          const dw = (defaultWorkflow.value || "").trim();
+          if (dt) STATE.cfg.default_table = dt; else delete STATE.cfg.default_table;
+          if (dw) STATE.cfg.default_workflow = dw; else delete STATE.cfg.default_workflow;
+        }
+      };
+      return;
+    }
+
+    if (t === "panel") {
+      const orig = (STATE.cfg && STATE.cfg.panel && typeof STATE.cfg.panel === "object") ? STATE.cfg.panel : {};
+      const titleInput = el("input", {type:"text", value: String(orig.title || "ComfyUI 控制面板")});
+
+      const rowsWrap = el("div", {class:"panelRows"}, []);
+
+      function makeTypeSelect(value) {
+        const sel = el("select", null, [
+          el("option", {value:"default", text:"default"}),
+          el("option", {value:"primary", text:"primary"}),
+          el("option", {value:"danger", text:"danger"}),
+        ]);
+        const v = String(value || "default");
+        sel.value = (v === "primary" || v === "danger" || v === "default") ? v : "default";
+        return sel;
+      }
+
+      function addButton(btnList, btn) {
+        const text = el("input", {type:"text", value: String((btn && btn.text) || ""), placeholder:"按钮文字"});
+        const cmd = el("input", {type:"text", value: String((btn && btn.cmd) || ""), placeholder:"cmd（如 help / run_default / drain）"});
+        const typeSel = makeTypeSelect(btn && btn.type);
+        const argsEd = kvEditor((btn && btn.args) || {}, "参数 key", "参数 value", "新增参数");
+        const del = el("button", {type:"button", text:"删除", class:"btnGhost"});
+
+        const top = el("div", {class:"panelBtnGrid"}, [text, cmd, typeSel, del]);
+        const card = el("div", {class:"panelBtnCard"}, [top, argsEd]);
+
+        del.onclick = () => card.remove();
+        card._getValue = () => {
+          const t1 = (text.value || "").trim();
+          const c1 = (cmd.value || "").trim();
+          const tp = (typeSel.value || "default").trim();
+          const args = argsEd._getValue ? argsEd._getValue() : {};
+          return {text: t1, cmd: c1, type: tp, args: args};
+        };
+        btnList.appendChild(card);
+      }
+
+      function addRow(row) {
+        const wrap = el("div", {class:"block"});
+        const header = el("div", {class:"blockTitle"}, [
+          el("div", {class:"blockTitleLeft"}, [
+            el("span", {class:"pill", text:"面板"}),
+            el("div", {class:"blockTitleText", text:"一行按钮"}),
+            el("div", {class:"blockTitleSub", text:"这一行会放在同一行显示"}),
+          ]),
+        ]);
+        const delRow = el("button", {type:"button", text:"删除本行", class:"btnDanger", style:"float:right"});
+        header.appendChild(delRow);
+        delRow.onclick = () => wrap.remove();
+        const btnHeader = el("div", {class:"panelBtnGrid panelBtnHeader"}, [
+          el("div", {text:"文字"}),
+          el("div", {text:"cmd"}),
+          el("div", {text:"type"}),
+          el("div", {text:""}),
+        ]);
+        const btnList = el("div", {class:"panelBtnList"}, []);
+
+        const init = Array.isArray(row) ? row : [];
+        if (init.length) {
+          for (const b of init) addButton(btnList, b);
+        } else {
+          addButton(btnList, {text:"", cmd:"", type:"default", args:{}});
+        }
+
+        const addBtn = el("button", {type:"button", text:"新增按钮", class:"btnGhost"});
+        addBtn.onclick = () => addButton(btnList, {text:"", cmd:"", type:"default", args:{}});
+
+        wrap.appendChild(header);
+        wrap.appendChild(el("div", {class:"form"}, [
+          el("div", {class:"field"}, [
+            el("div", {class:"label", text:"按钮列表"}),
+            btnHeader,
+            btnList,
+            el("div", {class:"help", text:"cmd 对应你的指令名；args 会原样传给指令。"}),
+          ]),
+          el("div", {class:"kvActions", style:"margin-top:10px"}, [addBtn]),
+        ]));
+
+        wrap._getValue = () => {
+          const out = [];
+          for (const el0 of Array.from(btnList.children)) {
+            if (!el0._getValue) continue;
+            const v = el0._getValue();
+            if (!v || !v.text || !v.cmd) continue;
+            out.push(v);
+          }
+          return out;
+        };
+        rowsWrap.appendChild(wrap);
+      }
+
+      const origRows = Array.isArray(orig.rows) ? orig.rows : null;
+      if (origRows && origRows.length) {
+        for (const r of origRows) addRow(r);
+      } else {
+        addRow([{text:"运行默认流程", cmd:"run_default", type:"primary", args:{}}, {text:"执行队列(drain)", cmd:"drain", type:"danger", args:{}}]);
+      }
+
+      const addRowBtn = el("button", {type:"button", text:"新增一排按钮", class:"btnGhost"});
+      addRowBtn.onclick = () => addRow([]);
+
+      root.appendChild(el("div", {class:"sectionHeader"}, [
+        el("div", null, [el("h2", {text:"panel"}), el("div", {class:"help", text:"配置 /panel 发送的控制面板按钮。每一行代表一排按钮。"})]),
+      ]));
+      root.appendChild(el("div", {class:"form"}, [
+        el("div", {class:"field"}, [el("div", {class:"label", text:"title"}), titleInput, el("div", {class:"help", text:"面板标题。"})]),
+      ]));
+      root.appendChild(rowsWrap);
+      root.appendChild(el("div", {class:"kvActions", style:"margin-top:12px"}, [addRowBtn]));
+
+      CURRENT = {
+        commit: () => {
+          const title = (titleInput.value || "").trim() || "ComfyUI 控制面板";
+          const rows = [];
+          for (const rowEl of Array.from(rowsWrap.children)) {
+            if (!rowEl._getValue) continue;
+            const r = rowEl._getValue();
+            if (Array.isArray(r) && r.length) rows.push(r);
+          }
+          STATE.cfg.panel = {title, rows};
+        }
+      };
+      return;
+    }
 
     if (t === "env") {
       const v = (STATE.env && key in STATE.env) ? String(STATE.env[key] || "") : "";
@@ -904,7 +1101,7 @@ _PAGE_HTML = r"""
           ]),
           el("div", {class:"form"}, [
             statusValues,
-            el("div", {class:"help", text:"状态值映射：内部状态 -> 表格显示值。默认内部状态：queued（待处理）、running（执行中）、done（已完成）、failed（生成失败）。"}),
+            el("div", {class:"help", text:"状态值映射：内部状态 -> 表格显示值。默认内部状态：queued（待处理）、running（执行中）、done（已完成）、partial（部分完成）、failed（生成失败）。"}),
           ]),
         ]),
       ]));
@@ -940,6 +1137,7 @@ _PAGE_HTML = r"""
       const apiPath = el("input", {type:"text", value: String(orig.apiWorkflowPath || orig.api_workflow_path || "")});
       const baseUrl = el("input", {type:"text", value: String(orig.comfyuiBaseUrl || orig.comfyui_base_url || "")});
       const tableKey = el("input", {type:"text", value: String(orig.table || "")});
+      const runLogTableKey = el("input", {type:"text", value: String(orig.runLogTable || orig.run_log_table || orig.runLogTableKey || orig.run_log_table_key || "")});
       const defaults = kvEditor(orig.defaults || {}, "key", "value");
       const recordFields = kvEditor(orig.recordFields || orig.record_fields || {}, "参数名(如 prompt)", "列名(如 提示词)");
       const writeBackFields = kvEditor(orig.writeBackFields || orig.write_back_fields || {}, "字段key(如 output)", "列名(如 生成结果)");
@@ -1008,6 +1206,7 @@ _PAGE_HTML = r"""
           el("div", {class:"field"}, [el("div", {class:"label", text:"comfyuiBaseUrl（可选）"}), baseUrl, el("div", {class:"help", text:"不填则用 .env 的 COMFYUI_BASE_URL。"})]),
         ]),
         el("div", {class:"field bitableOnly"}, [el("div", {class:"label", text:"table"}), tableKey, el("div", {class:"help", text:"绑定的表格 key（对应 tables）。"} )]),
+        el("div", {class:"field bitableOnly"}, [el("div", {class:"label", text:"runLogTable（运行记录表）"}), runLogTableKey, el("div", {class:"help", text:"把每个子任务的提交/成功/失败/结果写到这张表。填 tables 里的 key（例如 runlog_table）。留空表示不记录。"} )]),
         el("div", {class:"block"}, [
           el("div", {class:"blockTitle"}, [
             el("div", {class:"blockTitleLeft"}, [
@@ -1127,6 +1326,8 @@ _PAGE_HTML = r"""
           if (baseUrlV) out.comfyuiBaseUrl = baseUrlV; else delete out.comfyuiBaseUrl;
           const tableV = (tableKey.value || "").trim();
           if (tableV) out.table = tableV; else delete out.table;
+          const rlt = (runLogTableKey.value || "").trim();
+          if (rlt) out.runLogTable = rlt; else delete out.runLogTable;
           out.defaults = defaults._getValue();
           out.recordFields = recordFields._getValue();
           out.writeBackFields = writeBackFields._getValue();
