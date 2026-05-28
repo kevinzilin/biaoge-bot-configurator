@@ -20,7 +20,6 @@ from .context import AppContext
 from .im import IMClient
 from .modules.bitable_logic import resolve_relation_prompts as _enc_resolve_relation_prompts
 from .modules.bitable_writeback import (
-    update_runlog_record as _enc_update_runlog_record,
     update_split_progress_and_maybe_finalize as _enc_update_split_progress_and_maybe_finalize,
     write_back_record as _enc_write_back_record,
 )
@@ -363,6 +362,87 @@ async def _resolve_record_by_prompt_id(ctx: AppContext, *, prompt_id: str) -> tu
     return None, None
 
 
+async def _resolve_runlog_record_by_prompt_id(
+    ctx: AppContext,
+    *,
+    run_log_table_key: str,
+    prompt_id: str,
+    source_record_id: str | None = None,
+) -> str | None:
+    pid = str(prompt_id or "").strip()
+    tlk = str(run_log_table_key or "").strip()
+    if not pid or not tlk or not ctx.bitable_mode.read_enabled:
+        return None
+
+    bitable = ctx.bitables.get(tlk) if ctx.bitables else None
+    cfg = ctx.bitable_configs.get(tlk) if ctx.bitable_configs else None
+    if not bitable or not cfg:
+        return None
+
+    fields = getattr(cfg, "fields", None) or {}
+    task_id_field = fields.get("task_id") if isinstance(fields, dict) else None
+    source_record_field = fields.get("source_record_id") if isinstance(fields, dict) else None
+    if not isinstance(task_id_field, str) or not task_id_field.strip():
+        return None
+
+    conditions: list[dict[str, Any]] = [{"field_name": task_id_field.strip(), "operator": "is", "value": [pid]}]
+    src = str(source_record_id or "").strip()
+    if src and isinstance(source_record_field, str) and source_record_field.strip():
+        conditions.append({"field_name": source_record_field.strip(), "operator": "is", "value": [src]})
+
+    try:
+        items = await bitable.search_records(filter_={"conjunction": "and", "conditions": conditions}, page_size=1)
+    except Exception:
+        items = []
+    if not items:
+        try:
+            items = await bitable.search_records(
+                filter_={
+                    "conjunction": "and",
+                    "conditions": [{"field_name": task_id_field.strip(), "operator": "contains", "value": [pid]}],
+                },
+                page_size=1,
+            )
+        except Exception:
+            items = []
+    if not items:
+        return None
+
+    rid = items[0].get("record_id")
+    if rid:
+        return str(rid)
+    return None
+
+
+async def _load_runlog_submitted_at_ms(
+    *,
+    runlog_bitable: Any,
+    runlog_cfg: Any,
+    run_log_record_id: str,
+) -> int | None:
+    rid = str(run_log_record_id or "").strip()
+    if not rid:
+        return None
+    submitted_field = None
+    fields = getattr(runlog_cfg, "fields", None) or {}
+    if isinstance(fields, dict):
+        submitted_field = fields.get("submitted_at")
+    if not isinstance(submitted_field, str) or not submitted_field.strip():
+        return None
+    try:
+        rec = await runlog_bitable.get_record(rid)
+    except Exception:
+        return None
+    fields0 = rec.get("fields") if isinstance(rec, dict) and isinstance(rec.get("fields"), dict) else {}
+    raw = fields0.get(submitted_field.strip())
+    try:
+        if raw is None or str(raw).strip() == "":
+            return None
+        return int(raw)
+    except Exception:
+        return None
+
+
 def _extract_error(payload: dict[str, Any]) -> str | None:
     for k in ("error", "err"):
         v = payload.get(k)
@@ -441,6 +521,132 @@ async def _write_back_record(
         error=error,
         cb_ctx=cb_ctx,
     )
+
+
+async def _update_runlog_record(
+    *,
+    runlog_bitable: Any,
+    runlog_cfg: Any,
+    run_log_record_id: str,
+    run_log_submitted_at_ms: Any,
+    ok: bool,
+    payload: dict[str, Any],
+    err: str | None,
+    result_urls: list[str],
+) -> None:
+    """把单条任务的最终结果写回运行记录表。
+
+    这个版本会先看“生成结果”列是什么类型：
+    - 如果是附件列，就写附件 token。
+    - 如果是文本列，就写可访问链接。
+    同时如果结果列写失败，也会尽量保住状态、完成时间这些基础信息先落表。
+    """
+    now_ms = int(time.time() * 1000)
+    submitted_ms = run_log_submitted_at_ms
+    try:
+        submitted_ms = int(submitted_ms) if submitted_ms is not None else None
+    except Exception:
+        submitted_ms = None
+
+    duration_sec = None
+    if isinstance(submitted_ms, int) and submitted_ms > 0:
+        duration_sec = max(0, int((now_ms - submitted_ms) / 1000))
+
+    def _col(key: str) -> str | None:
+        fields = getattr(runlog_cfg, "fields", None) or {}
+        value = fields.get(key) if isinstance(fields, dict) else None
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return None
+
+    updates: dict[str, Any] = {}
+
+    task_status_col = _col("task_status")
+    if task_status_col:
+        updates[task_status_col] = "成功" if ok else "失败"
+
+    finished_at_col = _col("finished_at")
+    if finished_at_col:
+        updates[finished_at_col] = now_ms
+
+    duration_col = _col("duration_sec")
+    if duration_col and duration_sec is not None:
+        updates[duration_col] = duration_sec
+
+    code_col = _col("error_code")
+    message_col = _col("error_message")
+    error_code = payload.get("errorCode")
+    if error_code in (None, ""):
+        error_code = payload.get("error_code")
+    error_code = str(error_code).strip() if error_code is not None and str(error_code).strip() else ""
+    if code_col:
+        updates[code_col] = "" if ok else error_code
+    if message_col:
+        updates[message_col] = "" if ok else str(err or "")
+
+    output_col = _col("output")
+    output_tokens = payload.get("runlog_output_file_tokens")
+    output_tokens = output_tokens if isinstance(output_tokens, list) else []
+    clean_urls = [str(item).strip() for item in (result_urls or []) if str(item).strip()]
+    if output_col:
+        meta_map: dict[str, dict[str, Any]] = {}
+        cache_key = "runlog::" + (str(getattr(runlog_cfg, "table_id", "") or "").strip() or str(output_col))
+        now = time.time()
+
+        async with _FIELDS_META_CACHE_LOCK:
+            cached = _FIELDS_META_CACHE.get(cache_key)
+        if cached and (now - float(cached[0] or 0.0)) < 300:
+            meta_map = cached[1]
+        else:
+            items: list[dict[str, Any]] = []
+            if hasattr(runlog_bitable, "list_fields"):
+                try:
+                    items = await runlog_bitable.list_fields()
+                except Exception:
+                    items = []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                field_name = item.get("field_name")
+                if isinstance(field_name, str) and field_name:
+                    meta_map[field_name] = item
+            async with _FIELDS_META_CACHE_LOCK:
+                _FIELDS_META_CACHE[cache_key] = (now, meta_map)
+
+        ui_type = ""
+        try:
+            ui_type = str((meta_map.get(output_col) or {}).get("ui_type") or "")
+        except Exception:
+            ui_type = ""
+        want_attachment = "Attachment" in ui_type
+
+        if want_attachment:
+            if output_tokens:
+                updates[output_col] = output_tokens
+        elif clean_urls:
+            updates[output_col] = "\n".join(clean_urls)
+
+    if not updates:
+        return
+
+    try:
+        await runlog_bitable.update_record(str(run_log_record_id), updates)
+    except Exception as exc:
+        msg = str(exc)
+        matched = re.search(r"fields\.([^'\"\s]+)", msg)
+        if matched:
+            missing = matched.group(1)
+            updates2 = {key: value for key, value in updates.items() if str(key) != missing}
+            if updates2 and updates2 != updates:
+                await runlog_bitable.update_record(str(run_log_record_id), updates2)
+                return
+
+        if output_col and output_col in updates:
+            updates2 = {key: value for key, value in updates.items() if str(key) != str(output_col)}
+            if updates2 and updates2 != updates:
+                await runlog_bitable.update_record(str(run_log_record_id), updates2)
+                return
+        raise
 
 
 async def _update_split_progress_and_maybe_finalize(
@@ -1062,7 +1268,17 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
     run_log_record_id = cb_ctx.get("runLogRecordId") or cb_ctx.get("run_log_record_id")
     run_log_submitted_at_ms = cb_ctx.get("runLogSubmittedAtMs") or cb_ctx.get("run_log_submitted_at_ms")
 
-    if (not record_id or not table_key) and prompt_id and hasattr(ctx.runner, "resolve_prompt"):
+    need_resolve_prompt_ctx = bool(
+        prompt_id
+        and (
+            not record_id
+            or not table_key
+            or not run_log_table_key
+            or not run_log_record_id
+            or run_log_submitted_at_ms is None
+        )
+    )
+    if need_resolve_prompt_ctx and hasattr(ctx.runner, "resolve_prompt"):
         try:
             resolved = await ctx.runner.resolve_prompt(prompt_id=prompt_id)
         except Exception:
@@ -1099,7 +1315,6 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
                 cb_ctx["split_index"] = resolved.get("split_index")
             if resolved.get("append_output") is not None and cb_ctx.get("append_output") is None:
                 cb_ctx["append_output"] = resolved.get("append_output")
-
     if (not record_id or not table_key) and prompt_id:
         rid, tk = await _resolve_record_by_prompt_id(ctx, prompt_id=prompt_id)
         if not record_id and rid:
@@ -1134,6 +1349,35 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
         raw = (ctx.config.get("workflows") or {}).get(workflow_name)
         if isinstance(raw, dict):
             workflow_cfg = raw
+
+    if not run_log_table_key and isinstance(workflow_cfg, dict):
+        tlk = workflow_cfg.get("runLogTable") or workflow_cfg.get("run_log_table") or workflow_cfg.get("runLogTableKey") or workflow_cfg.get("run_log_table_key")
+        if isinstance(tlk, str) and tlk.strip():
+            run_log_table_key = tlk.strip()
+
+    if (not runlog_bitable or not runlog_cfg) and isinstance(run_log_table_key, str) and run_log_table_key:
+        runlog_bitable = ctx.bitables.get(run_log_table_key)
+        runlog_cfg = ctx.bitable_configs.get(run_log_table_key)
+
+    if not run_log_record_id and prompt_id and runlog_bitable and runlog_cfg:
+        try:
+            run_log_record_id = await _resolve_runlog_record_by_prompt_id(
+                ctx,
+                run_log_table_key=str(run_log_table_key),
+                prompt_id=prompt_id,
+                source_record_id=record_id,
+            )
+        except Exception:
+            run_log_record_id = None
+    if run_log_submitted_at_ms is None and run_log_record_id and runlog_bitable and runlog_cfg:
+        try:
+            run_log_submitted_at_ms = await _load_runlog_submitted_at_ms(
+                runlog_bitable=runlog_bitable,
+                runlog_cfg=runlog_cfg,
+                run_log_record_id=str(run_log_record_id),
+            )
+        except Exception:
+            run_log_submitted_at_ms = None
 
     base_override = None
     if isinstance(workflow_cfg, dict):
@@ -1343,7 +1587,7 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
             payload_for_runlog = dict(payload) if isinstance(payload, dict) else {}
             if runlog_file_tokens:
                 payload_for_runlog["runlog_output_file_tokens"] = runlog_file_tokens
-            await _enc_update_runlog_record(
+            await _update_runlog_record(
                 runlog_bitable=runlog_bitable,
                 runlog_cfg=runlog_cfg,
                 run_log_record_id=str(run_log_record_id),
@@ -1351,6 +1595,7 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
                 ok=ok,
                 payload=payload_for_runlog,
                 err=err,
+                result_urls=result_urls,
             )
         except Exception as e:
             msg = f"write runlog failed: table={run_log_table_key} record={run_log_record_id} err={e}"
