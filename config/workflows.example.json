@@ -11,15 +11,23 @@
         "output": "生成结果",
         "error": "错误信息",
         "prompt_id": "任务ID",
-        "created_time": "创建时间"
+        "created_time": "创建时间",
+        "trigger_cmd": "触发指令",
+        "trigger_user": "触发人"
       },
       "status_values": {
         "queued": "待处理",
-        "running": "处理中",
+        "trigger": "触发执行",
+        "running": "执行中",
         "done": "已完成",
+        "partial": "部分完成",
         "failed": "生成失败"
       }
     }
+  },
+  "automation": {
+    "trigger_cmd_field": "触发指令",
+    "trigger_user_field": "触发人"
   },
   "workflows": {
     "klein_add_real_details_local": {
@@ -34,7 +42,7 @@
       "writeBackFields": {
         "output": "生成结果",
         "status": "任务状态",
-        "error": "失败原因",
+        "error": "错误信息",
         "prompt_id": "任务ID"
       },
       "params": {
@@ -65,7 +73,7 @@
       "writeBackFields": {
         "output": "生成结果",
         "status": "任务状态",
-        "error": "失败原因",
+        "error": "错误信息",
         "prompt_id": "任务ID"
       },
       "params": {
@@ -102,7 +110,7 @@
       "writeBackFields": {
         "output": "生成结果",
         "status": "任务状态",
-        "error": "失败原因",
+        "error": "错误信息",
         "prompt_id": "任务ID"
       },
       "params": {
@@ -187,5 +195,38 @@
         }
       }
     }
+  },
+  "panel": {
+    "title": "ComfyUI 控制面板",
+    "rows": [
+      [
+        {
+          "text": "运行默认流程",
+          "cmd": "run_default",
+          "type": "primary",
+          "args": {}
+        },
+        {
+          "text": "打开帮助",
+          "cmd": "help",
+          "type": "default",
+          "args": {}
+        }
+      ],
+      [
+        {
+          "text": "执行队列(drain)",
+          "cmd": "drain",
+          "type": "danger",
+          "args": {}
+        },
+        {
+          "text": "查看上下文ID",
+          "cmd": "ids",
+          "type": "default",
+          "args": {}
+        }
+      ]
+    ]
   }
 }

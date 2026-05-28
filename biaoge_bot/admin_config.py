@@ -369,7 +369,28 @@ _PAGE_HTML = r"""
     .blockTitleLeft { display:flex; align-items:center; gap: 10px; min-width: 0; }
     .blockTitleText { font-size: 13px; color: rgba(229,231,235,0.92); font-weight: 650; white-space: nowrap; }
     .blockTitleSub { font-size: 12px; color: rgba(163,163,163,0.95); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-    .paramCard { border: 1px solid rgba(255,255,255,0.14) !important; background: rgba(255,255,255,0.04) !important; }
+    .paramCard {
+      border: 1px solid rgba(255,255,255,0.18) !important;
+      background: rgba(255,255,255,0.072) !important;
+      transition: background 0.22s ease, border-color 0.22s ease, box-shadow 0.22s ease, transform 0.22s ease;
+    }
+    .paramsBlock {
+      background: rgba(255,255,255,0.082);
+      border-color: rgba(255,255,255,0.20);
+      box-shadow: 0 12px 26px rgba(0,0,0,0.28);
+      transition: background 0.22s ease, border-color 0.22s ease, box-shadow 0.22s ease;
+    }
+    .paramsBlock.paramsStrictOn {
+      background: rgba(255,255,255,0.028);
+      border-color: rgba(255,255,255,0.10);
+      box-shadow: 0 16px 34px rgba(0,0,0,0.40), 0 0 0 1px rgba(96,165,250,0.05) inset;
+    }
+    .paramsBlock.paramsStrictOn .paramCard {
+      background: rgba(255,255,255,0.026) !important;
+      border-color: rgba(255,255,255,0.10) !important;
+      box-shadow: 0 10px 22px rgba(0,0,0,0.28);
+      transform: translateY(-1px);
+    }
     .switch {
       appearance: none;
       -webkit-appearance: none;
@@ -483,6 +504,8 @@ _PAGE_HTML = r"""
     selected: {type: "env", key: ""},
   };
   const PARAM_TYPE_OPTIONS = ["str", "int", "float", "bool"];
+  const TABLE_FIELD_KEY_OPTIONS = ["status", "output", "error", "prompt_id", "created_time", "trigger_cmd", "trigger_user"];
+  const STATUS_VALUE_KEY_OPTIONS = ["queued", "trigger", "running", "done", "partial", "failed"];
   let CURRENT = null;
 
   window.addEventListener("error", (ev) => {
@@ -519,6 +542,17 @@ _PAGE_HTML = r"""
     return dl;
   }
 
+  function ensureSimpleDatalist(id, items) {
+    let dl = document.getElementById(id);
+    if (dl) return dl;
+    dl = el("datalist", {id});
+    for (const it of (Array.isArray(items) ? items : [])) {
+      dl.appendChild(el("option", {value: String(it || "")}));
+    }
+    document.body.appendChild(dl);
+    return dl;
+  }
+
   function setStatus(text, cls) {
     const el0 = $("status");
     el0.className = cls || "muted";
@@ -539,9 +573,16 @@ _PAGE_HTML = r"""
     return JSON.parse(JSON.stringify(v || {}));
   }
 
-  function kvEditor(initial, keyPlaceholder, valuePlaceholder, addText) {
+  function kvEditor(initial, keyPlaceholder, valuePlaceholder, addText, options) {
     const wrap = el("div", {class:"kvWrap"});
     const table = el("table");
+    const opts = (options && typeof options === "object") ? options : {};
+    const keyListId = (opts.keyListId && String(opts.keyListId || "").trim()) ? String(opts.keyListId || "").trim() : "";
+    const keyOptions = Array.isArray(opts.keyOptions) ? opts.keyOptions : [];
+    const valueListId = (opts.valueListId && String(opts.valueListId || "").trim()) ? String(opts.valueListId || "").trim() : "";
+    const valueOptions = Array.isArray(opts.valueOptions) ? opts.valueOptions : [];
+    if (keyListId && keyOptions.length) ensureSimpleDatalist(keyListId, keyOptions);
+    if (valueListId && valueOptions.length) ensureSimpleDatalist(valueListId, valueOptions);
     const thead = el("thead", null, [el("tr", null, [
       el("th", {text:"KEY", style:"width:220px"}),
       el("th", {text:"VALUE"}),
@@ -554,6 +595,8 @@ _PAGE_HTML = r"""
     function addRow(k, v) {
       const key = el("input", {type:"text", value: (k||""), placeholder: keyPlaceholder || ""});
       const val = el("input", {type:"text", value: (v==null ? "" : String(v)), placeholder: valuePlaceholder || ""});
+      if (keyListId) key.setAttribute("list", keyListId);
+      if (valueListId) val.setAttribute("list", valueListId);
       const del = el("button", {type:"button", text:"删除", class:"btnGhost"});
       const tr = el("tr", null, [
         el("td", null, [key]),
@@ -715,13 +758,21 @@ _PAGE_HTML = r"""
       ]);
       card.appendChild(head);
       card.appendChild(form);
-      card._collect = () => {
+      card._collect = (strictEmptyName) => {
         const name = (nameInput.value || "").trim();
-        if (!name) throw new Error("params 里有参数名为空");
+        const hasType = !!(typeInput.value || "").trim();
+        const targetItems = targets._getValue();
+        const hasTargets = Array.isArray(targetItems) && targetItems.length > 0;
+        const hasMeaningfulContent = hasType || hasTargets;
+        if (!name) {
+          if (!hasMeaningfulContent) return null;
+          if (strictEmptyName) throw new Error("params 里有参数名为空");
+          return null;
+        }
         const out = {...orig};
         const t = (typeInput.value || "").trim();
         if (t) out.type = t; else delete out.type;
-        out.targets = targets._getValue();
+        out.targets = targetItems;
         return [name, out];
       };
       list.appendChild(card);
@@ -740,10 +791,18 @@ _PAGE_HTML = r"""
     wrap.appendChild(el("div", {class:"help", text:"params 用来定义可从表格/命令传入的参数，以及每个参数要写入工作流的哪些节点。"}));
     wrap.appendChild(list);
     wrap.appendChild(addBtn);
-    wrap._getValue = () => {
+    wrap._setStrictTone = (enabled) => {
+      if (enabled) wrap.classList.add("paramsStrictOn");
+      else wrap.classList.remove("paramsStrictOn");
+    };
+    wrap._getValue = (options) => {
+      const opts = (options && typeof options === "object") ? options : {};
+      const strictEmptyName = !!opts.strictEmptyName;
       const out = {};
       for (const card of Array.from(list.children)) {
-        const [k, v] = card._collect();
+        const pair = card._collect(strictEmptyName);
+        if (!pair) continue;
+        const [k, v] = pair;
         out[k] = v;
       }
       return out;
@@ -811,6 +870,14 @@ _PAGE_HTML = r"""
         el("div", {class:"sideKey", text:"panel"}),
       ]);
       item.onclick = () => select("panel", "root");
+      globalList.appendChild(item);
+    }
+    {
+      const active = STATE.selected.type === "automation";
+      const item = el("button", {type:"button", class:"sideItem" + (active ? " active" : "")}, [
+        el("div", {class:"sideKey", text:"automation"}),
+      ]);
+      item.onclick = () => select("automation", "root");
       globalList.appendChild(item);
     }
 
@@ -1012,6 +1079,69 @@ _PAGE_HTML = r"""
       return;
     }
 
+    if (t === "automation") {
+      const orig = (STATE.cfg && STATE.cfg.automation && typeof STATE.cfg.automation === "object") ? STATE.cfg.automation : {};
+      const triggerCmdField = el("input", {
+        type:"text",
+        value: String(orig.trigger_cmd_field || orig.triggerCmdField || orig.trigger_field || orig.triggerField || orig.cmd_field || orig.cmdField || ""),
+        placeholder:"例如：触发指令",
+      });
+      const triggerUserField = el("input", {
+        type:"text",
+        value: String(orig.trigger_user_field || orig.triggerUserField || orig.operator_field || orig.operatorField || ""),
+        placeholder:"例如：触发人（可选）",
+      });
+
+      root.appendChild(el("div", {class:"sectionHeader"}, [
+        el("div", null, [el("h2", {text:"automation"}), el("div", {class:"help", text:"配置表格事件触发的全局兜底字段名。优先级是：table.fields 里的单表配置优先，automation 只在表里没写时才会生效。"})]),
+      ]));
+
+      root.appendChild(el("div", {class:"form"}, [
+        el("div", {class:"block bitableOnly"}, [
+          el("div", {class:"blockTitle"}, [
+            el("div", {class:"blockTitleLeft"}, [
+              el("span", {class:"pill", text:"触发"}),
+              el("div", {class:"blockTitleText", text:"automation"}),
+              el("div", {class:"blockTitleSub", text:"表格触发执行的全局默认字段"}),
+            ]),
+          ]),
+          el("div", {class:"form"}, [
+            el("div", {class:"field"}, [
+              el("div", {class:"label", text:"trigger_cmd_field"}),
+              triggerCmdField,
+              el("div", {class:"help", text:"全局默认的“触发指令”列名。只有 tables.xxx.fields 没写 trigger_cmd 时，才会退回用这里。"}),
+            ]),
+            el("div", {class:"field"}, [
+              el("div", {class:"label", text:"trigger_user_field（可选）"}),
+              triggerUserField,
+              el("div", {class:"help", text:"全局默认的“触发人”列名。只有事件里拿不到 operator_open_id，且 tables.xxx.fields 没写 trigger_user 时，才会退回用这里。推荐使用人员字段；留空表示不用这条兜底链路。"}),
+            ]),
+          ]),
+        ]),
+      ]));
+
+      CURRENT = {
+        commit: () => {
+          const out = deepCopy(orig);
+          const cmdField = (triggerCmdField.value || "").trim();
+          const userField = (triggerUserField.value || "").trim();
+          if (cmdField) out.trigger_cmd_field = cmdField; else delete out.trigger_cmd_field;
+          delete out.triggerCmdField;
+          delete out.trigger_field;
+          delete out.triggerField;
+          delete out.cmd_field;
+          delete out.cmdField;
+          if (userField) out.trigger_user_field = userField; else delete out.trigger_user_field;
+          delete out.triggerUserField;
+          delete out.operator_field;
+          delete out.operatorField;
+          if (Object.keys(out).length) STATE.cfg.automation = out;
+          else delete STATE.cfg.automation;
+        }
+      };
+      return;
+    }
+
     if (t === "env") {
       const v = (STATE.env && key in STATE.env) ? String(STATE.env[key] || "") : "";
       const desc = ENV_DESC[key] || "配置说明待补充。";
@@ -1046,8 +1176,20 @@ _PAGE_HTML = r"""
       const appToken = el("input", {type:"text", value: String(orig.app_token || "")});
       const tableId = el("input", {type:"text", value: String(orig.table_id || "")});
       const viewId = el("input", {type:"text", value: String(orig.view_id || "")});
-      const fields = kvEditor(orig.fields || {}, "字段key(如 status)", "列名(如 任务状态)");
-      const statusValues = kvEditor(orig.status_values || {}, "状态key(如 queued)", "显示值(如 待处理)");
+      const fields = kvEditor(
+        orig.fields || {},
+        "字段key(如 status)",
+        "列名(如 任务状态)",
+        undefined,
+        {keyListId:"tableFieldKeyDatalist", keyOptions: TABLE_FIELD_KEY_OPTIONS}
+      );
+      const statusValues = kvEditor(
+        orig.status_values || {},
+        "状态key(如 queued)",
+        "显示值(如 待处理)",
+        undefined,
+        {keyListId:"statusValueKeyDatalist", keyOptions: STATUS_VALUE_KEY_OPTIONS}
+      );
 
       delBtn.onclick = () => {
         delete tables[key];
@@ -1088,7 +1230,7 @@ _PAGE_HTML = r"""
           ]),
           el("div", {class:"form"}, [
             fields,
-            el("div", {class:"help", text:"字段映射：key 为系统字段名，value 为多维表格列名。默认系统字段名：status（任务状态）、workflow（工作流）、output（生成结果）、error（错误信息）、prompt_id（prompt_id/任务ID）、created_time（创建时间）。"}),
+            el("div", {class:"help", text:"字段映射：key 为系统字段名，value 为多维表格列名。KEY 现在支持下拉选择，也可以手填。常用项：status（任务状态）、output（生成结果）、error（错误信息）、prompt_id（prompt_id/任务ID）、created_time（创建时间）、trigger_cmd（触发指令）、trigger_user（触发人，可选）。"}),
           ]),
         ]),
         el("div", {class:"block"}, [
@@ -1101,7 +1243,7 @@ _PAGE_HTML = r"""
           ]),
           el("div", {class:"form"}, [
             statusValues,
-            el("div", {class:"help", text:"状态值映射：内部状态 -> 表格显示值。默认内部状态：queued（待处理）、running（执行中）、done（已完成）、partial（部分完成）、failed（生成失败）。"}),
+            el("div", {class:"help", text:"状态值映射：内部状态 -> 表格显示值。KEY 现在支持下拉选择，也可以手填。常用项：queued（待处理）、trigger（触发执行）、running（执行中）、done（已完成）、partial（部分完成）、failed（生成失败）。"}),
           ]),
         ]),
       ]));
@@ -1142,6 +1284,8 @@ _PAGE_HTML = r"""
       const recordFields = kvEditor(orig.recordFields || orig.record_fields || {}, "参数名(如 prompt)", "列名(如 提示词)");
       const writeBackFields = kvEditor(orig.writeBackFields || orig.write_back_fields || {}, "字段key(如 output)", "列名(如 生成结果)");
       const params = paramsEditor(orig.params || {});
+      const strictParamValidation = el("input", {type:"checkbox", class:"switch"});
+      strictParamValidation.checked = false;
       const runninghubWorkflowId = el("input", {type:"text", value: (orig.runninghub && orig.runninghub.workflowId) ? String(orig.runninghub.workflowId) : ""});
 
       const relOrig = orig.relationPrompt || orig.relation_prompt || {};
@@ -1167,18 +1311,32 @@ _PAGE_HTML = r"""
       const relPf = relOrig.promptFields || relOrig.prompt_fields || [];
       const relPromptFields = listEditor(relPf, "字段名(如 通用总控提示词)");
       const relJoinWith = el("input", {type:"text", value: String(relOrig.joinWith || relOrig.join_with || "\\n")});
+      const workflowTableBindingEnabled = el("input", {type:"checkbox", class:"switch"});
+      workflowTableBindingEnabled.checked = !!(
+        String(orig.table || "").trim() ||
+        String(orig.runLogTable || orig.run_log_table || orig.runLogTableKey || orig.run_log_table_key || "").trim() ||
+        Object.keys(orig.recordFields || orig.record_fields || {}).length ||
+        Object.keys(orig.writeBackFields || orig.write_back_fields || {}).length ||
+        (relOrig && typeof relOrig === "object" && Object.keys(relOrig).length)
+      );
 
       function applyRelationEnabled() {
-        const show = relationEnabled.checked;
+        const show = workflowTableBindingEnabled.checked && relationEnabled.checked;
         for (const it of Array.from(root.querySelectorAll(".relationOnly"))) it.style.display = show ? "" : "none";
         const showItem = show && relEnableItemParamMap.checked;
         const showPrompt = show && relEnablePromptFields.checked;
         for (const it of Array.from(root.querySelectorAll(".relItemBody"))) it.style.display = showItem ? "" : "none";
         for (const it of Array.from(root.querySelectorAll(".relPromptBody"))) it.style.display = showPrompt ? "" : "none";
       }
+      function applyWorkflowTableBindingEnabled() {
+        const show = bitableEnabled && workflowTableBindingEnabled.checked;
+        for (const it of Array.from(root.querySelectorAll(".workflowTableOnly"))) it.style.display = show ? "" : "none";
+        applyRelationEnabled();
+      }
       relationEnabled.onchange = () => applyRelationEnabled();
       relEnableItemParamMap.onchange = () => applyRelationEnabled();
       relEnablePromptFields.onchange = () => applyRelationEnabled();
+      workflowTableBindingEnabled.onchange = () => applyWorkflowTableBindingEnabled();
 
       delBtn.onclick = () => {
         delete wfs[key];
@@ -1205,8 +1363,13 @@ _PAGE_HTML = r"""
           el("div", {class:"field"}, [el("div", {class:"label", text:"apiWorkflowPath"}), apiPath, el("div", {class:"help", text:"降级兜底用：当 /prompt_workflow 返回 404（插件缺失/工作流不存在）时，读取该 JSON（需为 ComfyUI API Format）并改走 /prompt 执行。"})]),
           el("div", {class:"field"}, [el("div", {class:"label", text:"comfyuiBaseUrl（可选）"}), baseUrl, el("div", {class:"help", text:"不填则用 .env 的 COMFYUI_BASE_URL。"})]),
         ]),
-        el("div", {class:"field bitableOnly"}, [el("div", {class:"label", text:"table"}), tableKey, el("div", {class:"help", text:"绑定的表格 key（对应 tables）。"} )]),
-        el("div", {class:"field bitableOnly"}, [el("div", {class:"label", text:"runLogTable（运行记录表）"}), runLogTableKey, el("div", {class:"help", text:"把每个子任务的提交/成功/失败/结果写到这张表。填 tables 里的 key（例如 runlog_table）。留空表示不记录。"} )]),
+        el("div", {class:"field bitableOnly"}, [
+          el("div", {class:"label", text:"关联表格"}),
+          workflowTableBindingEnabled,
+          el("div", {class:"help", text:"总开关。关闭时会隐藏并在保存时清空 table、runLogTable、recordFields、writeBackFields、relationPrompt 这些表格相关配置。"}),
+        ]),
+        el("div", {class:"field bitableOnly workflowTableOnly"}, [el("div", {class:"label", text:"table"}), tableKey, el("div", {class:"help", text:"绑定的表格 key（对应 tables）。"} )]),
+        el("div", {class:"field bitableOnly workflowTableOnly"}, [el("div", {class:"label", text:"runLogTable（运行记录表）"}), runLogTableKey, el("div", {class:"help", text:"把每个子任务的提交/成功/失败/结果写到这张表。填 tables 里的 key（例如 runlog_table）。留空表示不记录。"} )]),
         el("div", {class:"block"}, [
           el("div", {class:"blockTitle"}, [
             el("div", {class:"blockTitleLeft"}, [
@@ -1220,7 +1383,7 @@ _PAGE_HTML = r"""
             el("div", {class:"help", text:"常见用途：save_prefix_1/save_prefix_2（若绑定了 record 且用户没传，会自动拼上 record_id 以避免重名）。"}),
           ]),
         ]),
-        el("div", {class:"block bitableOnly"}, [
+        el("div", {class:"block bitableOnly workflowTableOnly"}, [
           el("div", {class:"blockTitle"}, [
             el("div", {class:"blockTitleLeft"}, [
               el("span", {class:"pill", text:"读取"}),
@@ -1233,7 +1396,7 @@ _PAGE_HTML = r"""
             el("div", {class:"help", text:"例：prompt -> 提示词；images -> 产品图。"}),
           ]),
         ]),
-        el("div", {class:"block bitableOnly"}, [
+        el("div", {class:"block bitableOnly workflowTableOnly"}, [
           el("div", {class:"blockTitle"}, [
             el("div", {class:"blockTitleLeft"}, [
               el("span", {class:"pill", text:"回写"}),
@@ -1246,7 +1409,7 @@ _PAGE_HTML = r"""
             el("div", {class:"help", text:"例：output -> 结果图；prompt_id -> 任务ID；status -> 任务状态。"}),
           ]),
         ]),
-        el("div", {class:"block bitableOnly"}, [
+        el("div", {class:"block bitableOnly workflowTableOnly"}, [
           el("div", {class:"blockTitle"}, [
             el("div", {class:"blockTitleLeft"}, [
               el("span", {class:"pill", text:"关联"}),
@@ -1294,7 +1457,8 @@ _PAGE_HTML = r"""
             ]),
           ]),
         ]),
-        el("div", {class:"block"}, [
+        (() => {
+          const paramsBlock = el("div", {class:"block paramsBlock"}, [
           el("div", {class:"blockTitle"}, [
             el("div", {class:"blockTitleLeft"}, [
               el("span", {class:"pill", text:"映射"}),
@@ -1303,10 +1467,28 @@ _PAGE_HTML = r"""
             ]),
           ]),
           el("div", {class:"form"}, [
+            el("div", {class:"field"}, [
+              el("div", {class:"label", text:"校验空参数名"}),
+              strictParamValidation,
+              el("div", {class:"help", text:"默认关闭：空白参数卡不会拦住切页或保存。打开后：只要 params 里有填了内容但参数名为空，就提示报错。"}),
+            ]),
             params,
           ]),
-        ]),
+          ]);
+          root._paramsBlock = paramsBlock;
+          return paramsBlock;
+        })(),
       ]));
+
+      function applyStrictParamValidationTone() {
+        const pb = root._paramsBlock;
+        if (pb) {
+          if (strictParamValidation.checked) pb.classList.add("paramsStrictOn");
+          else pb.classList.remove("paramsStrictOn");
+        }
+        if (params && params._setStrictTone) params._setStrictTone(!!strictParamValidation.checked);
+      }
+      strictParamValidation.onchange = () => applyStrictParamValidationTone();
 
       const items = root.querySelectorAll(".bitableOnly");
       for (const it of items) it.style.display = bitableEnabled ? "" : "none";
@@ -1324,55 +1506,63 @@ _PAGE_HTML = r"""
           if (apiPathV) out.apiWorkflowPath = apiPathV; else delete out.apiWorkflowPath;
           const baseUrlV = (baseUrl.value || "").trim();
           if (baseUrlV) out.comfyuiBaseUrl = baseUrlV; else delete out.comfyuiBaseUrl;
-          const tableV = (tableKey.value || "").trim();
-          if (tableV) out.table = tableV; else delete out.table;
-          const rlt = (runLogTableKey.value || "").trim();
-          if (rlt) out.runLogTable = rlt; else delete out.runLogTable;
           out.defaults = defaults._getValue();
-          out.recordFields = recordFields._getValue();
-          out.writeBackFields = writeBackFields._getValue();
+          if (workflowTableBindingEnabled.checked) {
+            const tableV = (tableKey.value || "").trim();
+            if (tableV) out.table = tableV; else delete out.table;
+            const rlt = (runLogTableKey.value || "").trim();
+            if (rlt) out.runLogTable = rlt; else delete out.runLogTable;
+            out.recordFields = recordFields._getValue();
+            out.writeBackFields = writeBackFields._getValue();
 
-          if (relationEnabled.checked) {
-            const rp = deepCopy(relOrig && typeof relOrig === "object" ? relOrig : {});
-            const sf = (relSourceField.value || "").trim();
-            if (!sf) throw new Error("relationPrompt 启用时，sourceField 不能为空");
-            rp.sourceField = sf;
-            const tp = (relTargetParam.value || "").trim();
-            rp.targetParam = tp || "prompt";
-            rp.split = !!relSplit.checked;
-            rp.strict = !!relStrict.checked;
-            rp.enableItemParamMap = !!relEnableItemParamMap.checked;
-            rp.enablePromptFields = !!relEnablePromptFields.checked;
-            const mi = (relMaxItems.value || "").trim();
-            if (mi) {
-              const n = parseInt(mi, 10);
-              if (!isNaN(n)) rp.maxItems = n;
+            if (relationEnabled.checked) {
+              const rp = deepCopy(relOrig && typeof relOrig === "object" ? relOrig : {});
+              const sf = (relSourceField.value || "").trim();
+              if (!sf) throw new Error("relationPrompt 启用时，sourceField 不能为空");
+              rp.sourceField = sf;
+              const tp = (relTargetParam.value || "").trim();
+              rp.targetParam = tp || "prompt";
+              rp.split = !!relSplit.checked;
+              rp.strict = !!relStrict.checked;
+              rp.enableItemParamMap = !!relEnableItemParamMap.checked;
+              rp.enablePromptFields = !!relEnablePromptFields.checked;
+              const mi = (relMaxItems.value || "").trim();
+              if (mi) {
+                const n = parseInt(mi, 10);
+                if (!isNaN(n)) rp.maxItems = n;
+              } else {
+                delete rp.maxItems;
+              }
+              const jw = (relJoinWith.value || "").trim();
+              rp.joinWith = jw ? jw.replace(/\\n/g, "\n") : "\n";
+              const ttk = (relTargetTableKey.value || "").trim();
+              if (ttk) rp.targetTableKey = ttk; else delete rp.targetTableKey;
+              const tam = (relTargetAppToken.value || "").trim();
+              if (tam) rp.targetAppToken = tam; else delete rp.targetAppToken;
+              const tti = (relTargetTableId.value || "").trim();
+              if (tti) rp.targetTableId = tti; else delete rp.targetTableId;
+              const tmf = (relTargetMatchField.value || "").trim();
+              if (tmf) rp.targetMatchField = tmf; else delete rp.targetMatchField;
+
+              const ipm = rp.enableItemParamMap ? relItemParamMap._getValue() : {};
+              const ipmKeys = Object.keys(ipm || {});
+              if (ipmKeys.length) rp.itemParamMap = ipm; else delete rp.itemParamMap;
+
+              const pf = rp.enablePromptFields ? relPromptFields._getValue() : [];
+              if (!pf.length && !ipmKeys.length) throw new Error("relationPrompt 启用时，itemParamMap 或 promptFields 至少启用一个并填写内容");
+              if (pf.length) rp.promptFields = pf; else delete rp.promptFields;
+              out.relationPrompt = rp;
             } else {
-              delete rp.maxItems;
+              delete out.relationPrompt;
             }
-            const jw = (relJoinWith.value || "").trim();
-            rp.joinWith = jw ? jw.replace(/\\n/g, "\n") : "\n";
-            const ttk = (relTargetTableKey.value || "").trim();
-            if (ttk) rp.targetTableKey = ttk; else delete rp.targetTableKey;
-            const tam = (relTargetAppToken.value || "").trim();
-            if (tam) rp.targetAppToken = tam; else delete rp.targetAppToken;
-            const tti = (relTargetTableId.value || "").trim();
-            if (tti) rp.targetTableId = tti; else delete rp.targetTableId;
-            const tmf = (relTargetMatchField.value || "").trim();
-            if (tmf) rp.targetMatchField = tmf; else delete rp.targetMatchField;
-
-            const ipm = rp.enableItemParamMap ? relItemParamMap._getValue() : {};
-            const ipmKeys = Object.keys(ipm || {});
-            if (ipmKeys.length) rp.itemParamMap = ipm; else delete rp.itemParamMap;
-
-            const pf = rp.enablePromptFields ? relPromptFields._getValue() : [];
-            if (!pf.length && !ipmKeys.length) throw new Error("relationPrompt 启用时，itemParamMap 或 promptFields 至少启用一个并填写内容");
-            if (pf.length) rp.promptFields = pf; else delete rp.promptFields;
-            out.relationPrompt = rp;
           } else {
+            delete out.table;
+            delete out.runLogTable;
+            delete out.recordFields;
+            delete out.writeBackFields;
             delete out.relationPrompt;
           }
-          out.params = params._getValue();
+          out.params = params._getValue({strictEmptyName: strictParamValidation.checked});
 
           const rhId = (runninghubWorkflowId.value || "").trim();
           if (rhId) out.runninghub = {...(out.runninghub||{}), workflowId: rhId};
@@ -1384,6 +1574,8 @@ _PAGE_HTML = r"""
           STATE.selected = {type:"workflow", key:newKey};
         }
       };
+      applyStrictParamValidationTone();
+      applyWorkflowTableBindingEnabled();
       applyRelationEnabled();
       return;
     }
@@ -1414,6 +1606,7 @@ _PAGE_HTML = r"""
     $("wfPath").textContent = "path: " + String(wf.path || "");
     if (!STATE.cfg.tables) STATE.cfg.tables = {};
     if (!STATE.cfg.workflows) STATE.cfg.workflows = {};
+    if (!STATE.cfg.automation || typeof STATE.cfg.automation !== "object") STATE.cfg.automation = {};
 
     const firstEnv = Object.keys(STATE.env || {}).sort()[0] || "";
     if (!STATE.selected.key) STATE.selected = {type:"env", key:firstEnv};
