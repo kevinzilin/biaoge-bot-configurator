@@ -630,6 +630,16 @@ _PAGE_HTML = r"""
       }
       return out;
     };
+    wrap._setValue = (obj) => {
+      while (tbody.firstChild) tbody.removeChild(tbody.firstChild);
+      const o = obj && typeof obj === "object" ? obj : {};
+      const keys = Object.keys(o);
+      if (keys.length) {
+        for (const k of keys) addRow(k, o[k]);
+      } else {
+        addRow("", "");
+      }
+    };
     return wrap;
   }
 
@@ -670,6 +680,15 @@ _PAGE_HTML = r"""
         out.push(v);
       }
       return out;
+    };
+    wrap._setValue = (list0) => {
+      while (tbody.firstChild) tbody.removeChild(tbody.firstChild);
+      const init = Array.isArray(list0) ? list0 : (typeof list0 === "string" ? [list0] : []);
+      if (init.length) {
+        for (const v of init) addRow(v);
+      } else {
+        addRow("");
+      }
     };
     return wrap;
   }
@@ -821,10 +840,10 @@ _PAGE_HTML = r"""
     }
   }
 
-  function commitCurrent() {
+  function commitCurrent(purpose) {
     if (!CURRENT || !CURRENT.commit) return true;
     try {
-      CURRENT.commit();
+      CURRENT.commit(purpose);
       CURRENT = null;
       return true;
     } catch (e) {
@@ -834,7 +853,7 @@ _PAGE_HTML = r"""
   }
 
   function select(type, key) {
-    if (!commitCurrent()) return;
+    if (!commitCurrent("navigate")) return;
     STATE.selected = {type, key};
     renderSidebar();
     renderEditor();
@@ -1301,7 +1320,11 @@ _PAGE_HTML = r"""
       relEnableItemParamMap.checked = (relOrig.enableItemParamMap == null && relOrig.enable_item_param_map == null) ? true : !!(relOrig.enableItemParamMap ?? relOrig.enable_item_param_map);
       const relEnablePromptFields = el("input", {type:"checkbox", class:"switch"});
       relEnablePromptFields.checked = (relOrig.enablePromptFields == null && relOrig.enable_prompt_fields == null) ? true : !!(relOrig.enablePromptFields ?? relOrig.enable_prompt_fields);
-      const relMaxItems = el("input", {type:"text", value: String(relOrig.maxItems || relOrig.max_items || "20")});
+      const relMaxItems = el("input", {
+        type:"text",
+        value: (relOrig.maxItems != null) ? String(relOrig.maxItems) : ((relOrig.max_items != null) ? String(relOrig.max_items) : ""),
+        placeholder: "20",
+      });
       const relTargetTableKey = el("input", {type:"text", value: String(relOrig.targetTableKey || relOrig.target_table_key || "")});
       const relTargetAppToken = el("input", {type:"text", value: String(relOrig.targetAppToken || relOrig.target_app_token || relOrig.app_token || "")});
       const relTargetTableId = el("input", {type:"text", value: String(relOrig.targetTableId || relOrig.target_table_id || relOrig.table_id || "")});
@@ -1312,6 +1335,49 @@ _PAGE_HTML = r"""
       const relPromptFields = listEditor(relPf, "字段名(如 通用总控提示词)");
       const relJoinWith = el("input", {type:"text", value: String(relOrig.joinWith || relOrig.join_with || "\\n")});
       const workflowTableBindingEnabled = el("input", {type:"checkbox", class:"switch"});
+      const TABLE_BINDING_BACKUP_KEY = "_tableBindingBackup";
+      const TB_BACKUP_LS_PREFIX = "wf_table_binding_backup::";
+      function _loadTableBindingBackupFromLocalStorage(wfKey0) {
+        const k0 = String(wfKey0 || "").trim();
+        if (!k0) return null;
+        try {
+          const raw = String(localStorage.getItem(TB_BACKUP_LS_PREFIX + k0) || "");
+          if (!raw.trim()) return null;
+          const obj = JSON.parse(raw);
+          return (obj && typeof obj === "object") ? obj : null;
+        } catch (e) {
+          return null;
+        }
+      }
+      function _saveTableBindingBackupToLocalStorage(wfKey0, backup0) {
+        const k0 = String(wfKey0 || "").trim();
+        if (!k0) return;
+        try {
+          if (backup0 && typeof backup0 === "object") localStorage.setItem(TB_BACKUP_LS_PREFIX + k0, JSON.stringify(backup0));
+          else localStorage.removeItem(TB_BACKUP_LS_PREFIX + k0);
+        } catch (e) {}
+      }
+      function _getWorkflowTableBindingBackupFromOrig(orig0) {
+        if (!(orig0 && typeof orig0 === "object")) return null;
+        return orig0[TABLE_BINDING_BACKUP_KEY] || orig0._workflowTableBindingBackup || orig0._workflow_table_binding_backup || null;
+      }
+      function _extractWorkflowTableBindingFromWorkflowSpec(wfSpec0) {
+        const wf0 = wfSpec0 && typeof wfSpec0 === "object" ? wfSpec0 : {};
+        const out = {};
+        const tableV = String(wf0.table || "").trim();
+        if (tableV) out.table = tableV;
+        const rlt = String(wf0.runLogTable || wf0.run_log_table || wf0.runLogTableKey || wf0.run_log_table_key || "").trim();
+        if (rlt) out.runLogTable = rlt;
+        const rf = wf0.recordFields || wf0.record_fields || {};
+        if (rf && typeof rf === "object" && Object.keys(rf).length) out.recordFields = deepCopy(rf);
+        const wb = wf0.writeBackFields || wf0.write_back_fields || {};
+        if (wb && typeof wb === "object" && Object.keys(wb).length) out.writeBackFields = deepCopy(wb);
+        const rp = wf0.relationPrompt || wf0.relation_prompt || null;
+        if (rp && typeof rp === "object" && Object.keys(rp).length) out.relationPrompt = deepCopy(rp);
+        const hasAny = Object.keys(out).length > 0;
+        return hasAny ? out : null;
+      }
+      let tbBackup = _loadTableBindingBackupFromLocalStorage(key) || _getWorkflowTableBindingBackupFromOrig(orig) || null;
       workflowTableBindingEnabled.checked = !!(
         String(orig.table || "").trim() ||
         String(orig.runLogTable || orig.run_log_table || orig.runLogTableKey || orig.run_log_table_key || "").trim() ||
@@ -1319,6 +1385,147 @@ _PAGE_HTML = r"""
         Object.keys(orig.writeBackFields || orig.write_back_fields || {}).length ||
         (relOrig && typeof relOrig === "object" && Object.keys(relOrig).length)
       );
+      function _hasAnyTableBindingInputValue() {
+        const hasText = (s) => !!String(s || "").trim();
+        const hasObj = (o) => !!(o && typeof o === "object" && Object.keys(o).length);
+        const rf = recordFields && recordFields._getValue ? recordFields._getValue() : {};
+        const wf = writeBackFields && writeBackFields._getValue ? writeBackFields._getValue() : {};
+        const ipm = relItemParamMap && relItemParamMap._getValue ? relItemParamMap._getValue() : {};
+        const pf = relPromptFields && relPromptFields._getValue ? relPromptFields._getValue() : [];
+        const anyRelText = relationEnabled.checked && (
+          hasText(relSourceField.value) ||
+          hasText(relTargetParam.value) ||
+          hasText(relMaxItems.value) ||
+          hasText(relTargetTableKey.value) ||
+          hasText(relTargetAppToken.value) ||
+          hasText(relTargetTableId.value) ||
+          hasText(relTargetMatchField.value)
+        );
+        return (
+          hasText(tableKey.value) ||
+          hasText(runLogTableKey.value) ||
+          hasObj(rf) ||
+          hasObj(wf) ||
+          relationEnabled.checked ||
+          anyRelText ||
+          hasObj(ipm) ||
+          (Array.isArray(pf) && pf.length)
+        );
+      }
+      function _buildRelationPromptBackup() {
+        const hasText = (s) => !!String(s || "").trim();
+        const enabled = !!relationEnabled.checked;
+        const rp = {};
+        const sf = (relSourceField.value || "").trim();
+        if (sf) rp.sourceField = sf;
+        const tp = (relTargetParam.value || "").trim();
+        if (tp) rp.targetParam = tp;
+        const mi = (relMaxItems.value || "").trim();
+        if (mi) {
+          const n = parseInt(mi, 10);
+          if (!isNaN(n)) rp.maxItems = n;
+        }
+        const jwRaw = (relJoinWith.value || "").trim();
+        if (jwRaw) rp.joinWith = jwRaw.replace(/\\n/g, "\n");
+        const ttk = (relTargetTableKey.value || "").trim();
+        if (ttk) rp.targetTableKey = ttk;
+        const tam = (relTargetAppToken.value || "").trim();
+        if (tam) rp.targetAppToken = tam;
+        const tti = (relTargetTableId.value || "").trim();
+        if (tti) rp.targetTableId = tti;
+        const tmf = (relTargetMatchField.value || "").trim();
+        if (tmf) rp.targetMatchField = tmf;
+        const ipm = relItemParamMap && relItemParamMap._getValue ? relItemParamMap._getValue() : {};
+        if (ipm && typeof ipm === "object" && Object.keys(ipm).length) rp.itemParamMap = ipm;
+        const pf = relPromptFields && relPromptFields._getValue ? relPromptFields._getValue() : [];
+        if (Array.isArray(pf) && pf.length) rp.promptFields = pf;
+        const hasCore = Object.keys(rp).some((k) => {
+          const v = rp[k];
+          if (typeof v === "number") return true;
+          if (typeof v === "string") return hasText(v);
+          if (Array.isArray(v)) return v.length > 0;
+          return !!(v && typeof v === "object" && Object.keys(v).length);
+        });
+        if (!hasCore) return null;
+        rp.split = !!relSplit.checked;
+        rp.strict = !!relStrict.checked;
+        rp.enableItemParamMap = !!relEnableItemParamMap.checked;
+        rp.enablePromptFields = !!relEnablePromptFields.checked;
+        return {enabled, spec: rp};
+      }
+      function _buildTableBindingBackup() {
+        const hasText = (s) => !!String(s || "").trim();
+        const backup = {};
+        const tableV = (tableKey.value || "").trim();
+        if (tableV) backup.table = tableV;
+        const rlt = (runLogTableKey.value || "").trim();
+        if (rlt) backup.runLogTable = rlt;
+        const rf = recordFields && recordFields._getValue ? recordFields._getValue() : {};
+        if (rf && typeof rf === "object" && Object.keys(rf).length) backup.recordFields = rf;
+        const wf = writeBackFields && writeBackFields._getValue ? writeBackFields._getValue() : {};
+        if (wf && typeof wf === "object" && Object.keys(wf).length) backup.writeBackFields = wf;
+        const rpPack = _buildRelationPromptBackup();
+        if (rpPack && rpPack.spec) {
+          backup.relationPrompt = rpPack.spec;
+          backup.relationPromptEnabled = !!rpPack.enabled;
+        }
+        const hasAny = Object.keys(backup).some((k) => {
+          const v = backup[k];
+          if (typeof v === "string") return hasText(v);
+          if (Array.isArray(v)) return v.length > 0;
+          return !!(v && typeof v === "object" && Object.keys(v).length);
+        });
+        return hasAny ? backup : null;
+      }
+      function _applyTableBindingBackupToInputs(backup) {
+        const b = backup && typeof backup === "object" ? backup : null;
+        if (!b) return;
+        const hasText = (s) => !!String(s || "").trim();
+        if (b.table != null && !hasText(tableKey.value)) tableKey.value = String(b.table);
+        if (b.runLogTable != null && !hasText(runLogTableKey.value)) runLogTableKey.value = String(b.runLogTable);
+        if (b.recordFields && recordFields && recordFields._setValue) recordFields._setValue(b.recordFields);
+        if (b.writeBackFields && writeBackFields && writeBackFields._setValue) writeBackFields._setValue(b.writeBackFields);
+        const rp = b.relationPrompt && typeof b.relationPrompt === "object" ? b.relationPrompt : null;
+        if (rp) {
+          if (b.relationPromptEnabled != null) relationEnabled.checked = !!b.relationPromptEnabled;
+          else relationEnabled.checked = true;
+          if (rp.sourceField != null && !hasText(relSourceField.value)) relSourceField.value = String(rp.sourceField);
+          if (rp.targetParam != null && !hasText(relTargetParam.value)) relTargetParam.value = String(rp.targetParam);
+          if (rp.split != null) relSplit.checked = !!rp.split;
+          if (rp.strict != null) relStrict.checked = !!rp.strict;
+          if (rp.enableItemParamMap != null) relEnableItemParamMap.checked = !!rp.enableItemParamMap;
+          if (rp.enablePromptFields != null) relEnablePromptFields.checked = !!rp.enablePromptFields;
+          if (rp.maxItems != null && !hasText(relMaxItems.value)) relMaxItems.value = String(rp.maxItems);
+          if (rp.joinWith != null && !hasText(relJoinWith.value)) relJoinWith.value = String(rp.joinWith).replace(/\n/g, "\\n");
+          if (rp.targetTableKey != null && !hasText(relTargetTableKey.value)) relTargetTableKey.value = String(rp.targetTableKey);
+          if (rp.targetAppToken != null && !hasText(relTargetAppToken.value)) relTargetAppToken.value = String(rp.targetAppToken);
+          if (rp.targetTableId != null && !hasText(relTargetTableId.value)) relTargetTableId.value = String(rp.targetTableId);
+          if (rp.targetMatchField != null && !hasText(relTargetMatchField.value)) relTargetMatchField.value = String(rp.targetMatchField);
+          if (rp.itemParamMap && relItemParamMap && relItemParamMap._setValue) relItemParamMap._setValue(rp.itemParamMap);
+          if (rp.promptFields && relPromptFields && relPromptFields._setValue) relPromptFields._setValue(rp.promptFields);
+        }
+      }
+      function _clearTableBindingInputs() {
+        tableKey.value = "";
+        runLogTableKey.value = "";
+        if (recordFields && recordFields._setValue) recordFields._setValue({});
+        if (writeBackFields && writeBackFields._setValue) writeBackFields._setValue({});
+        relationEnabled.checked = false;
+        relSourceField.value = "";
+        relTargetParam.value = "prompt";
+        relSplit.checked = true;
+        relStrict.checked = true;
+        relEnableItemParamMap.checked = true;
+        relEnablePromptFields.checked = true;
+        relMaxItems.value = "";
+        relTargetTableKey.value = "";
+        relTargetAppToken.value = "";
+        relTargetTableId.value = "";
+        relTargetMatchField.value = "";
+        if (relItemParamMap && relItemParamMap._setValue) relItemParamMap._setValue({});
+        if (relPromptFields && relPromptFields._setValue) relPromptFields._setValue([]);
+        relJoinWith.value = "\\n";
+      }
 
       function applyRelationEnabled() {
         const show = workflowTableBindingEnabled.checked && relationEnabled.checked;
@@ -1336,7 +1543,18 @@ _PAGE_HTML = r"""
       relationEnabled.onchange = () => applyRelationEnabled();
       relEnableItemParamMap.onchange = () => applyRelationEnabled();
       relEnablePromptFields.onchange = () => applyRelationEnabled();
-      workflowTableBindingEnabled.onchange = () => applyWorkflowTableBindingEnabled();
+      workflowTableBindingEnabled.onchange = () => {
+        if (workflowTableBindingEnabled.checked) {
+          const b = _loadTableBindingBackupFromLocalStorage(key) || _getWorkflowTableBindingBackupFromOrig(orig) || null;
+          if (!_hasAnyTableBindingInputValue()) _applyTableBindingBackupToInputs(b);
+        } else {
+          const b = _buildTableBindingBackup();
+          tbBackup = b;
+          _saveTableBindingBackupToLocalStorage(key, b);
+          _clearTableBindingInputs();
+        }
+        applyWorkflowTableBindingEnabled();
+      };
 
       delBtn.onclick = () => {
         delete wfs[key];
@@ -1494,7 +1712,7 @@ _PAGE_HTML = r"""
       for (const it of items) it.style.display = bitableEnabled ? "" : "none";
 
       CURRENT = {
-        commit: () => {
+        commit: (purpose) => {
           const newKey = (keyInput.value || "").trim();
           if (!newKey) throw new Error("workflow key 不能为空");
           const out = deepCopy(orig);
@@ -1562,6 +1780,16 @@ _PAGE_HTML = r"""
             delete out.writeBackFields;
             delete out.relationPrompt;
           }
+          const purposeV = String(purpose || "").trim().toLowerCase();
+          const isSave = purposeV === "save";
+          if (isSave) {
+            const nextBinding = _extractWorkflowTableBindingFromWorkflowSpec(out);
+            if (!nextBinding) {
+              const candidate = _loadTableBindingBackupFromLocalStorage(key) || _getWorkflowTableBindingBackupFromOrig(orig) || _extractWorkflowTableBindingFromWorkflowSpec(orig) || null;
+              if (!out[TABLE_BINDING_BACKUP_KEY] && candidate) out[TABLE_BINDING_BACKUP_KEY] = candidate;
+            }
+            try { _saveTableBindingBackupToLocalStorage(newKey, out[TABLE_BINDING_BACKUP_KEY] || null); } catch (e) {}
+          }
           out.params = params._getValue({strictEmptyName: strictParamValidation.checked});
 
           const rhId = (runninghubWorkflowId.value || "").trim();
@@ -1569,7 +1797,20 @@ _PAGE_HTML = r"""
           else if (out.runninghub && Object.keys(out.runninghub).length === 1 && out.runninghub.workflowId) delete out.runninghub;
           else if (out.runninghub) delete out.runninghub.workflowId;
 
-          if (newKey !== key) delete wfs[key];
+          if (newKey !== key) {
+            try {
+              const fromK = String(key || "").trim();
+              const toK = String(newKey || "").trim();
+              if (fromK && toK) {
+                const raw = String(localStorage.getItem(TB_BACKUP_LS_PREFIX + fromK) || "");
+                if (raw.trim() && !String(localStorage.getItem(TB_BACKUP_LS_PREFIX + toK) || "").trim()) {
+                  localStorage.setItem(TB_BACKUP_LS_PREFIX + toK, raw);
+                }
+                localStorage.removeItem(TB_BACKUP_LS_PREFIX + fromK);
+              }
+            } catch (e) {}
+            delete wfs[key];
+          }
           wfs[newKey] = out;
           STATE.selected = {type:"workflow", key:newKey};
         }
@@ -1621,7 +1862,7 @@ _PAGE_HTML = r"""
   async function saveAll() {
     try {
       setStatus("保存中...", "muted");
-      if (!commitCurrent()) return;
+      if (!commitCurrent("save")) return;
       renderSidebar();
       renderEditor();
 
@@ -1669,14 +1910,14 @@ _PAGE_HTML = r"""
   $("btnAddTable").onclick = () => {
     const mode = String(STATE.envMeta.bitable_mode || "").trim().toLowerCase();
     if (mode === "off") return;
-    if (!commitCurrent()) return;
+    if (!commitCurrent("navigate")) return;
     const key = "new_table";
     const tables = STATE.cfg.tables || {};
     if (!tables[key]) tables[key] = {app_token:"", table_id:"", view_id:"", fields:{}, status_values:{}};
     select("table", key);
   };
   $("btnAddWorkflow").onclick = () => {
-    if (!commitCurrent()) return;
+    if (!commitCurrent("navigate")) return;
     const key = "new_workflow";
     const wfs = STATE.cfg.workflows || {};
     if (!wfs[key]) wfs[key] = {workflowName:"", params:{}};
