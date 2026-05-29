@@ -1,67 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import os
 import threading
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
-from urllib.request import Request, urlopen
 
 from .dispatcher import TriggerContext, run_workflow
 from .modules.bitable_logic import claim_records as _enc_claim_records
-
-
-#region debug-point new-pc-generate-fail-queue-runner
-_DBG_DEFAULT_SESSION_ID = "new-pc-generate-fail"
-
-
-def _dbg_load_server_url() -> tuple[str | None, str]:
-    url = str(os.environ.get("DEBUG_SERVER_URL") or "").strip()
-    sid = str(os.environ.get("DEBUG_SESSION_ID") or _DBG_DEFAULT_SESSION_ID).strip() or _DBG_DEFAULT_SESSION_ID
-    if url:
-        return url, sid
-    try:
-        root = Path(__file__).resolve().parent.parent
-        p = root / ".dbg" / f"{sid}.env"
-        if not p.exists():
-            return None, sid
-        for line in p.read_text(encoding="utf-8", errors="ignore").splitlines():
-            s = line.strip()
-            if not s or s.startswith("#") or "=" not in s:
-                continue
-            k, v = s.split("=", 1)
-            if k.strip() == "DEBUG_SERVER_URL" and v.strip():
-                return v.strip(), sid
-    except Exception:
-        return None, sid
-    return None, sid
-
-
-def _dbg_emit(event: str, **fields: Any) -> None:
-    url, sid = _dbg_load_server_url()
-    if not url:
-        return
-    payload = {
-        "ts_ms": int(time.time() * 1000),
-        "sessionId": sid,
-        "runId": str(os.environ.get("DEBUG_RUN_ID") or "pre").strip() or "pre",
-        "event": str(event or "").strip() or "event",
-        "fields": fields,
-    }
-    try:
-        data = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
-        req = Request(url, data=data, headers={"Content-Type": "application/json"})
-        with urlopen(req, timeout=0.8) as resp:
-            resp.read(1)
-    except Exception:
-        return
-
-
-#endregion debug-point new-pc-generate-fail-queue-runner
-
 
 @dataclass
 class _RunState:
@@ -242,13 +188,7 @@ class QueueRunner:
                         }
                     else:
                         continue
-                except Exception as e:
-                    _dbg_emit(
-                        "queue_runner.poll_remote.exception",
-                        prompt_id=pid,
-                        provider=provider,
-                        error=str(e),
-                    )
+                except Exception:
                     continue
 
                 if not payload:
@@ -664,11 +604,6 @@ class QueueRunner:
 
         prompt_id: str | None = None
         err: str | None = None
-        _dbg_emit(
-            "queue_runner.queue_one.start",
-            rk=rk,
-            record_id=record_id,
-        )
         try:
             prompt_id = await run_workflow(
                 ctx,
@@ -682,32 +617,6 @@ class QueueRunner:
             )
         except Exception as e:
             err = str(e)
-            _dbg_emit(
-                "queue_runner.run_workflow.exception",
-                rk=rk,
-                record_id=record_id,
-                workflow_key=getattr(st, "workflow_key", None),
-                table_key=getattr(st, "table_key", None),
-                error=err,
-            )
-        else:
-            if not prompt_id:
-                _dbg_emit(
-                    "queue_runner.run_workflow.returned_none",
-                    rk=rk,
-                    record_id=record_id,
-                    workflow_key=getattr(st, "workflow_key", None),
-                    table_key=getattr(st, "table_key", None),
-                )
-            else:
-                _dbg_emit(
-                    "queue_runner.run_workflow.ok",
-                    rk=rk,
-                    record_id=record_id,
-                    workflow_key=getattr(st, "workflow_key", None),
-                    table_key=getattr(st, "table_key", None),
-                    prompt_id=prompt_id,
-                )
 
         async with self._lock:
             st2 = self._runs.get(rk)

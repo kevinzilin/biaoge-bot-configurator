@@ -498,6 +498,19 @@ def _resolve_table_key(ctx: AppContext, cb_ctx: dict[str, Any]) -> str | None:
     return None
 
 
+def _workflow_bound_table_key(ctx: AppContext, workflow_key: str | None) -> str | None:
+    wk = str(workflow_key or "").strip()
+    if not wk:
+        return None
+    wf_cfg = (ctx.config.get("workflows") or {}).get(wk) or {}
+    if not isinstance(wf_cfg, dict):
+        return None
+    v = wf_cfg.get("table")
+    if isinstance(v, str) and v.strip():
+        return v.strip()
+    return None
+
+
 async def _acquire_main_writeback_lock(table_cfg: Any, record_id: str) -> asyncio.Lock:
     """给同一条主表记录的回写排队，避免并发覆盖已追加的图片。"""
     table_id = str(getattr(table_cfg, "table_id", "") or "").strip()
@@ -715,7 +728,15 @@ def create_callback_app(ctx: AppContext) -> FastAPI:
     @app.post("/_local/exec")
     async def local_exec(payload: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
         from .commands import parse_message_text
-        from .dispatcher import TriggerContext, build_panel_card, get_help_text, run_workflow, _reset_table_records
+        from .dispatcher import (
+            TriggerContext,
+            _pick_table_key_for_workflow,
+            _pick_default_workflow_key,
+            build_panel_card,
+            get_help_text,
+            run_workflow,
+            _reset_table_records,
+        )
 
         text = payload.get("text")
         if not isinstance(text, str) or not text.strip():
@@ -795,36 +816,32 @@ def create_callback_app(ctx: AppContext) -> FastAPI:
             row = int(str(row)) if row is not None and str(row).isdigit() else None
             view_id = args.get("view") or args.get("view_id") or args.get("viewId")
             view_id = str(view_id) if view_id else None
-            table_key = args.get("table") or args.get("tableKey") or args.get("table_key")
-            table_key = str(table_key) if table_key else None
+            explicit_table_key = args.get("table") or args.get("tableKey") or args.get("table_key")
+            explicit_table_key = str(explicit_table_key) if explicit_table_key else None
+            workflow_arg = args.get("workflow") or args.get("workflowName") or args.get("wf") or args.get("name")
             if name == "wf":
                 wf = args.get("workflow") or args.get("workflowName") or args.get("wf") or args.get("name")
             else:
                 wf = args.get("workflow") or "default"
             workflow_key = str(wf) if wf else "default"
-            resolved_table_key = table_key or ctx.default_table_key
-            cfg_for_wf = (ctx.config.get("workflows") or {}).get(workflow_key) or {}
-            if not table_key and isinstance(cfg_for_wf, dict):
-                tk = cfg_for_wf.get("table")
-                if isinstance(tk, str) and tk:
-                    resolved_table_key = tk
+            allow_default_table = name == "run" and not workflow_arg
+            resolved_table_key = _pick_table_key_for_workflow(
+                ctx,
+                args=args,
+                workflow_key=workflow_key,
+                allow_default=allow_default_table,
+            )
             
             if workflow_key == "default" and not ctx.workflows.get("default"):
-                if resolved_table_key:
-                    for k, wf_spec in ctx.workflows._specs.items():
-                        wf_cfg = (ctx.config.get("workflows") or {}).get(k) or {}
-                        if isinstance(wf_cfg, dict) and wf_cfg.get("table") == resolved_table_key:
-                            workflow_key = k
-                            break
-                if workflow_key == "default":
-                    first_wf = ctx.workflows.first()
-                    if first_wf:
-                        workflow_key = first_wf.key
-                cfg_for_wf = (ctx.config.get("workflows") or {}).get(workflow_key) or {}
-                if not table_key and isinstance(cfg_for_wf, dict):
-                    tk = cfg_for_wf.get("table")
-                    if isinstance(tk, str) and tk:
-                        resolved_table_key = tk
+                picked = _pick_default_workflow_key(ctx, table_key=resolved_table_key)
+                if picked:
+                    workflow_key = picked
+                resolved_table_key = _pick_table_key_for_workflow(
+                    ctx,
+                    args=args,
+                    workflow_key=workflow_key,
+                    allow_default=allow_default_table,
+                )
                         
             if not record_id and not row:
                 bitable = ctx.bitables.get(resolved_table_key) if resolved_table_key else None
@@ -865,30 +882,27 @@ def create_callback_app(ctx: AppContext) -> FastAPI:
                 row=row,
                 view_id=view_id,
                 params=params,
-                table_key=table_key,
+                table_key=resolved_table_key,
+                allow_default_table_fallback=allow_default_table,
             )
             return {"ok": True, "prompt_id": prompt_id, "record_id": record_id, "row": row, "table": resolved_table_key, "workflow": workflow_key}
 
         if name in ("batch", "drain"):
-            table_key = str(args.get("table") or args.get("tableKey") or args.get("table_key") or ctx.default_table_key or "")
+            explicit_table_key = str(args.get("table") or args.get("tableKey") or args.get("table_key") or "")
             workflow_key = str(args.get("workflow") or args.get("workflowName") or args.get("wf") or args.get("name") or "")
+            table_key = explicit_table_key or ctx.default_table_key or ""
             
             if not workflow_key:
-                workflow_key = "default"
-                if not ctx.workflows.get("default"):
-                    if table_key:
-                        for k, wf_spec in ctx.workflows._specs.items():
-                            wf_cfg = (ctx.config.get("workflows") or {}).get(k) or {}
-                            if isinstance(wf_cfg, dict) and wf_cfg.get("table") == table_key:
-                                workflow_key = k
-                                break
-                    if workflow_key == "default":
-                        first_wf = ctx.workflows.first()
-                        if first_wf:
-                            workflow_key = first_wf.key
+                workflow_key = _pick_default_workflow_key(ctx, table_key=table_key or None) or "default"
 
             if not workflow_key or (workflow_key == "default" and not ctx.workflows.get("default")):
                 return {"ok": False, "error": "missing workflow"}
+            table_key = _pick_table_key_for_workflow(
+                ctx,
+                args=args,
+                workflow_key=workflow_key,
+                allow_default=True,
+            ) or ""
             if not table_key:
                 return {"ok": False, "error": "missing table"}
                 
@@ -912,21 +926,18 @@ def create_callback_app(ctx: AppContext) -> FastAPI:
 
         if name == "stop_queue":
             workflow_key = str(args.get("workflow") or args.get("workflowName") or args.get("wf") or args.get("name") or "")
-            table_key = str(args.get("table") or args.get("tableKey") or args.get("table_key") or ctx.default_table_key or "")
+            explicit_table_key = str(args.get("table") or args.get("tableKey") or args.get("table_key") or "")
+            table_key = explicit_table_key or ctx.default_table_key or ""
             
             if not workflow_key:
-                workflow_key = "default"
-                if not ctx.workflows.get("default"):
-                    if table_key:
-                        for k, wf_spec in ctx.workflows._specs.items():
-                            wf_cfg = (ctx.config.get("workflows") or {}).get(k) or {}
-                            if isinstance(wf_cfg, dict) and wf_cfg.get("table") == table_key:
-                                workflow_key = k
-                                break
-                    if workflow_key == "default":
-                        first_wf = ctx.workflows.first()
-                        if first_wf:
-                            workflow_key = first_wf.key
+                workflow_key = _pick_default_workflow_key(ctx, table_key=table_key or None) or "default"
+
+            table_key = _pick_table_key_for_workflow(
+                ctx,
+                args=args,
+                workflow_key=workflow_key,
+                allow_default=True,
+            ) or ""
 
             if workflow_key and table_key:
                 await ctx.runner.stop(workflow_key=workflow_key, table_key=table_key)
@@ -1332,7 +1343,38 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
                 cb_ctx["split_index"] = resolved.get("split_index")
             if resolved.get("append_output") is not None and cb_ctx.get("append_output") is None:
                 cb_ctx["append_output"] = resolved.get("append_output")
-    if (not record_id or not table_key) and prompt_id:
+
+    workflow_cfg = None
+    if isinstance(workflow_name, str):
+        raw = (ctx.config.get("workflows") or {}).get(workflow_name)
+        if isinstance(raw, dict):
+            workflow_cfg = raw
+    bound_table_key = _workflow_bound_table_key(ctx, workflow_name)
+
+    if not run_log_table_key and isinstance(workflow_cfg, dict):
+        tlk = workflow_cfg.get("runLogTable") or workflow_cfg.get("run_log_table") or workflow_cfg.get("runLogTableKey") or workflow_cfg.get("run_log_table_key")
+        if isinstance(tlk, str) and tlk.strip():
+            run_log_table_key = tlk.strip()
+
+    read_enabled = bool(getattr(getattr(ctx, "bitable_mode", None), "read_enabled", False))
+    should_search_main_table = bool(record_id or table_key or bound_table_key)
+    runlog_bitable = ctx.bitables.get(str(run_log_table_key)) if isinstance(run_log_table_key, str) and run_log_table_key else None
+    runlog_cfg = ctx.bitable_configs.get(str(run_log_table_key)) if isinstance(run_log_table_key, str) and run_log_table_key else None
+    should_search_runlog = bool(prompt_id and not run_log_record_id and runlog_bitable and runlog_cfg)
+    logging.info(
+        "callback lookup decision: prompt_id=%s workflow=%s read_enabled=%s record_id=%s explicit_table=%s bound_table=%s will_lookup_main_table=%s runlog_table=%s will_lookup_runlog=%s",
+        prompt_id,
+        workflow_name,
+        read_enabled,
+        bool(record_id),
+        table_key or "",
+        bound_table_key or "",
+        bool((not record_id or not table_key) and prompt_id and should_search_main_table and read_enabled),
+        run_log_table_key or "",
+        bool(should_search_runlog and read_enabled),
+    )
+
+    if (not record_id or not table_key) and prompt_id and should_search_main_table:
         rid, tk = await _resolve_record_by_prompt_id(ctx, prompt_id=prompt_id)
         if not record_id and rid:
             record_id = rid
@@ -1341,8 +1383,6 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
 
     bitable = ctx.bitables.get(table_key) if table_key else None
     table_cfg = ctx.bitable_configs.get(table_key) if table_key else None
-    runlog_bitable = ctx.bitables.get(str(run_log_table_key)) if isinstance(run_log_table_key, str) and run_log_table_key else None
-    runlog_cfg = ctx.bitable_configs.get(str(run_log_table_key)) if isinstance(run_log_table_key, str) and run_log_table_key else None
 
     dump_dir = os.environ.get("CALLBACK_DUMP_DIR", "").strip()
     if dump_dir:
@@ -1360,17 +1400,6 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
             )
         except Exception:
             pass
-
-    workflow_cfg = None
-    if isinstance(workflow_name, str):
-        raw = (ctx.config.get("workflows") or {}).get(workflow_name)
-        if isinstance(raw, dict):
-            workflow_cfg = raw
-
-    if not run_log_table_key and isinstance(workflow_cfg, dict):
-        tlk = workflow_cfg.get("runLogTable") or workflow_cfg.get("run_log_table") or workflow_cfg.get("runLogTableKey") or workflow_cfg.get("run_log_table_key")
-        if isinstance(tlk, str) and tlk.strip():
-            run_log_table_key = tlk.strip()
 
     if (not runlog_bitable or not runlog_cfg) and isinstance(run_log_table_key, str) and run_log_table_key:
         runlog_bitable = ctx.bitables.get(run_log_table_key)

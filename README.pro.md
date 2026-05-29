@@ -38,13 +38,15 @@
 
 - `/run_default`：运行默认工作流（从 workflows 配置里读取 default_workflow；通常用于“跑队列”场景）  
   示例：`/run_default`
-- `/run ...`：运行“默认工作流”，并支持指定表格记录/行号 + 覆盖参数  
+- `/run ...`：运行“默认工作流”，并支持指定表格记录/行号 + 覆盖参数；也支持显式指定 `workflow=... table=...`  
   示例：`/run record=recxxxx seed=1 steps=30 prompt=hello`  
-  示例：`/run row=6 seed=1 steps=30 prompt=hello`
-- `/wf <workflowKey> ...`：运行指定 workflow key，并支持指定表格记录/行号 + 覆盖参数  
+  示例：`/run row=6 seed=1 steps=30 prompt=hello`  
+  示例：`/run workflow=klein_add_real_details table=klein_table prompt=hello`
+- `/wf <workflowKey> ...`：运行指定 workflow key，并支持指定表格记录/行号 + 覆盖参数；如果命令未指定 table，且该 workflow 也未绑定 table，则按“纯参数直跑”处理  
   示例：`/wf klein_add_real_details record=recxxxx seed=1 steps=30 prompt=hello`  
   示例：`/wf klein_add_real_details row=6 view=vewxxxx`  
-  示例：`/wf klein_add_real_details 3.seed=1 10.text=hello`
+  示例：`/wf klein_add_real_details 3.seed=1 10.text=hello`  
+  示例：`/wf klein_add_real_details images="@E:\pics\my a.jpg" prompt="hello world"`
 
 队列/跑批（需要表格配置与授权可用）：
 
@@ -78,6 +80,16 @@
 
 ## BITABLE_MODE 情景（只读/只写/读写/关闭）
 
+补充说明（很重要）：
+
+- `BITABLE_MODE=auto` 的意思是“自动启用表格能力”，不是“所有命令都自动去读 default_table”
+- 在 `auto` 下，命令是否读表，取决于“这条命令需不需要表”以及“是否显式指定了 table / workflow 是否绑定了 table”
+- 当前命令选表规则：
+  - `/wf <workflow> ...`：`table 参数 > workflow.table > 纯参数直跑`
+  - `/run workflow=... ...`：`table 参数 > workflow.table > 纯参数直跑`
+  - 裸 `/run ...`：按默认入口处理，可使用 `default_workflow / default_table`
+  - `/batch /drain /stop_queue`：`table 参数 > workflow.table > default_table`
+
 ### 情景1：关闭表格读写（BITABLE_MODE=off）
 
 - 用法：只靠指令传参入队，不读表、不写表
@@ -100,6 +112,7 @@
   - 如果你想按“某个视图里看到的第 N 行”对齐，临时指定视图：`/wf klein_add_real_details row=6 view=vewxxxx table=prod_table`
 - 注意：
   - 只读模式不会写回，所以表格里状态不会变化
+  - 如果你执行的是 `/wf <workflow> ...` 或 `/run workflow=... ...`，但既没有传 `table=...`，该 workflow 也没有绑定 `table`，那么这条命令会按“纯参数直跑”处理，不会自动去读默认表
   - 表格附件会先下载到本机，再根据执行端做处理：
     - RunningHub：会自动上传，传入参数会替换成 `openapi/...` 这种文件名
     - ComfyUI：如果 `COMFYUI_UPLOAD_ENABLED=1` 会自动上传到 ComfyUI input；否则会尝试用 `COMFYUI_INPUT_DIR`/本地路径（取决于你的配置与节点兼容性）
@@ -119,7 +132,8 @@
   - `/wf klein_add_real_details row=4 table=prod_table prompt="hello"`
 - 注意：
   - 只写模式下，即使表格里有“提示词/参考图”等字段，也不会被当作输入读取；你仍需要在指令里把参数传全（包括附件用 `@...`）
-  - 如果你不提供 record/row，而表格又可读，程序可能会自动取下一条 queued 记录作为写回目标
+  - 如果你执行的是 `/wf <workflow> ...` 或 `/run workflow=... ...`，但既没有传 `table=...`，该 workflow 也没有绑定 `table`，那么这条命令会按“纯参数直跑”处理，不会自动去碰默认表
+  - 如果你明确传了 `table=...`，或者该 workflow 自己绑定了 `table`，但没有提供 `record/row`，程序仍可能从这张表里自动取下一条 queued 记录作为目标
 
 ## 公网转发器（阿里云 FC）配置要点
 

@@ -1,12 +1,8 @@
 from __future__ import annotations
 
 import json
-import os
-import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
-from urllib.request import Request, urlopen
 
 import httpx
 
@@ -16,72 +12,6 @@ def _strip_ticks(s: str) -> str:
     if v.startswith("`") and v.endswith("`") and len(v) >= 2:
         v = v[1:-1].strip()
     return v
-
-
-#region debug-point new-pc-generate-fail-runninghub
-_DBG_DEFAULT_SESSION_ID = "new-pc-generate-fail"
-
-
-def _dbg_load_server_url() -> tuple[str | None, str]:
-    url = str(os.environ.get("DEBUG_SERVER_URL") or "").strip()
-    sid = str(os.environ.get("DEBUG_SESSION_ID") or _DBG_DEFAULT_SESSION_ID).strip() or _DBG_DEFAULT_SESSION_ID
-    if url:
-        return url, sid
-    try:
-        root = Path(__file__).resolve().parent.parent
-        p = root / ".dbg" / f"{sid}.env"
-        if not p.exists():
-            return None, sid
-        for line in p.read_text(encoding="utf-8", errors="ignore").splitlines():
-            s = line.strip()
-            if not s or s.startswith("#") or "=" not in s:
-                continue
-            k, v = s.split("=", 1)
-            if k.strip() == "DEBUG_SERVER_URL" and v.strip():
-                return v.strip(), sid
-    except Exception:
-        return None, sid
-    return None, sid
-
-
-def _dbg_emit(event: str, **fields: Any) -> None:
-    url, sid = _dbg_load_server_url()
-    if not url:
-        return
-    payload = {
-        "ts_ms": int(time.time() * 1000),
-        "sessionId": sid,
-        "runId": str(os.environ.get("DEBUG_RUN_ID") or "pre").strip() or "pre",
-        "event": str(event or "").strip() or "event",
-        "fields": fields,
-    }
-    try:
-        data = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
-        req = Request(url, data=data, headers={"Content-Type": "application/json"})
-        with urlopen(req, timeout=0.8) as resp:
-            resp.read(1)
-    except Exception:
-        return
-
-
-def _dbg_response_brief(obj: Any) -> dict[str, Any]:
-    if not isinstance(obj, dict):
-        return {"type": str(type(obj))}
-    data = obj.get("data")
-    task_id = None
-    if isinstance(data, dict):
-        task_id = data.get("taskId")
-    return {
-        "keys": sorted([str(k) for k in obj.keys()])[:30],
-        "code": obj.get("code"),
-        "msg": obj.get("msg") or obj.get("message"),
-        "taskId_type": str(type(task_id)),
-        "taskId_value": str(task_id)[:120] if task_id is not None else None,
-    }
-
-
-#endregion debug-point new-pc-generate-fail-runninghub
-
 
 @dataclass(frozen=True)
 class RunningHubCreated:
@@ -163,12 +93,6 @@ class RunningHubClient:
             )
             r.raise_for_status()
             obj = r.json()
-            _dbg_emit(
-                "runninghub.create_task.response",
-                http_status=int(getattr(r, "status_code", 0) or 0),
-                content_type=str(r.headers.get("content-type") or ""),
-                brief=_dbg_response_brief(obj),
-            )
             if not isinstance(obj, dict):
                 raise RuntimeError("runninghub response invalid")
             code = obj.get("code")
@@ -204,13 +128,6 @@ class RunningHubClient:
             )
             r.raise_for_status()
             obj = r.json()
-            _dbg_emit(
-                "runninghub.query_v2.response",
-                task_id=tid,
-                http_status=int(getattr(r, "status_code", 0) or 0),
-                content_type=str(r.headers.get("content-type") or ""),
-                brief=_dbg_response_brief(obj),
-            )
             if not isinstance(obj, dict):
                 raise RuntimeError("runninghub response invalid")
 

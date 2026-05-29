@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
 
 import httpx
 
@@ -30,56 +29,6 @@ from .modules.bitable_logic import (
 )
 from .runninghub import RunningHubClient
 from .workflows import WorkflowSpec
-
-
-#region debug-point new-pc-generate-fail-dispatcher
-_DBG_DEFAULT_SESSION_ID = "new-pc-generate-fail"
-
-
-def _dbg_load_server_url() -> tuple[str | None, str]:
-    url = str(os.environ.get("DEBUG_SERVER_URL") or "").strip()
-    sid = str(os.environ.get("DEBUG_SESSION_ID") or _DBG_DEFAULT_SESSION_ID).strip() or _DBG_DEFAULT_SESSION_ID
-    if url:
-        return url, sid
-    try:
-        root = Path(__file__).resolve().parent.parent
-        p = root / ".dbg" / f"{sid}.env"
-        if not p.exists():
-            return None, sid
-        for line in p.read_text(encoding="utf-8", errors="ignore").splitlines():
-            s = line.strip()
-            if not s or s.startswith("#") or "=" not in s:
-                continue
-            k, v = s.split("=", 1)
-            if k.strip() == "DEBUG_SERVER_URL" and v.strip():
-                return v.strip(), sid
-    except Exception:
-        return None, sid
-    return None, sid
-
-
-def _dbg_emit(event: str, **fields: Any) -> None:
-    url, sid = _dbg_load_server_url()
-    if not url:
-        return
-    payload = {
-        "ts_ms": int(time.time() * 1000),
-        "sessionId": sid,
-        "runId": str(os.environ.get("DEBUG_RUN_ID") or "pre").strip() or "pre",
-        "event": str(event or "").strip() or "event",
-        "fields": fields,
-    }
-    try:
-        data = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
-        req = Request(url, data=data, headers={"Content-Type": "application/json"})
-        with urlopen(req, timeout=0.8) as resp:
-            resp.read(1)
-    except Exception:
-        return
-
-
-#endregion debug-point new-pc-generate-fail-dispatcher
-
 
 @dataclass(frozen=True)
 class TriggerContext:
@@ -300,10 +249,7 @@ def _pick_default_workflow_key(ctx: AppContext, *, table_key: str | None) -> str
     return first.key if first else None
 
 
-def _pick_table_key_for_workflow(ctx: AppContext, *, args: dict[str, Any], workflow_key: str | None) -> str | None:
-    t = _pick_table_key(args)
-    if t:
-        return t
+def _workflow_bound_table_key(ctx: AppContext, workflow_key: str | None) -> str | None:
     wk = str(workflow_key or "").strip()
     if wk:
         wf_cfg = (ctx.config.get("workflows") or {}).get(wk) or {}
@@ -311,7 +257,128 @@ def _pick_table_key_for_workflow(ctx: AppContext, *, args: dict[str, Any], workf
             v = wf_cfg.get("table")
             if isinstance(v, str) and v.strip():
                 return v.strip()
-    return ctx.default_table_key
+    return None
+
+
+def _pick_table_key_for_workflow(
+    ctx: AppContext,
+    *,
+    args: dict[str, Any],
+    workflow_key: str | None,
+    allow_default: bool = True,
+) -> str | None:
+    t = _pick_table_key(args)
+    if t:
+        return t
+    bound = _workflow_bound_table_key(ctx, workflow_key)
+    if bound:
+        return bound
+    return ctx.default_table_key if allow_default else None
+
+
+def _should_fallback_to_api_workflow(status_code: int | None) -> bool:
+    """只在 WorkflowPrompt 明确不可用/工作流不存在时才走 apiWorkflowPath 降级。"""
+    return int(status_code or 0) == 404
+
+
+def _parse_json_object(text: str) -> dict[str, Any] | None:
+    s = str(text or "").strip()
+    if not s:
+        return None
+    try:
+        obj = json.loads(s)
+    except Exception:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _looks_like_workflow_missing(body_text: str, body_obj: dict[str, Any] | None) -> bool:
+    hay = str(body_text or "").lower()
+    msg_parts: list[str] = [hay]
+    if isinstance(body_obj, dict):
+        err = body_obj.get("error")
+        if isinstance(err, dict):
+            msg_parts.extend([
+                str(err.get("type") or "").lower(),
+                str(err.get("message") or "").lower(),
+                str(err.get("details") or "").lower(),
+            ])
+    joined = "\n".join(msg_parts)
+    patterns = (
+        "workflow not found",
+        "workflow does not exist",
+        "unknown workflow",
+        "cannot find workflow",
+        "no workflow",
+        "route not found",
+        "not found",
+        "plugin not installed",
+    )
+    return any(p in joined for p in patterns)
+
+
+def _extract_first_node_error(body_obj: dict[str, Any] | None) -> tuple[str | None, str | None, str | None]:
+    if not isinstance(body_obj, dict):
+        return None, None, None
+    node_errors = body_obj.get("node_errors")
+    if not isinstance(node_errors, dict):
+        return None, None, None
+    for node_id, node_info in node_errors.items():
+        if not isinstance(node_info, dict):
+            continue
+        errs = node_info.get("errors")
+        if not isinstance(errs, list) or not errs:
+            continue
+        first = errs[0]
+        if not isinstance(first, dict):
+            continue
+        return str(node_id), str(first.get("message") or ""), str(first.get("details") or "")
+    return None, None, None
+
+
+def _build_workflowprompt_user_error(
+    *,
+    workflow_name: str,
+    status_code: int | None,
+    body_text: str,
+) -> tuple[str, bool]:
+    body_obj = _parse_json_object(body_text)
+    fallback_allowed = _should_fallback_to_api_workflow(status_code) or _looks_like_workflow_missing(body_text, body_obj)
+
+    error_block = body_obj.get("error") if isinstance(body_obj, dict) else None
+    error_type = str(error_block.get("type") or "") if isinstance(error_block, dict) else ""
+    error_message = str(error_block.get("message") or "") if isinstance(error_block, dict) else ""
+    error_details = str(error_block.get("details") or "") if isinstance(error_block, dict) else ""
+    node_id, node_message, node_details = _extract_first_node_error(body_obj)
+
+    if node_id or error_type == "prompt_outputs_failed_validation":
+        hint = "请检查你传入的参数值是否真的有效。"
+        if "invalid image file" in str(node_details or "").lower():
+            hint = (
+                "图片参数不对：`image/images` 需要传一张真正能读取到的图片。"
+                "如果你是直接用聊天里的上一张图，可以写 `image=@msg:last`；"
+                "如果你要传本机文件，可以写 `image=@E:\\pics\\a.jpg`。"
+            )
+        elif node_details:
+            hint = f"参数检查没通过：{node_details}"
+        msg = f"工作流参数检查没通过。{hint}"
+        if node_id:
+            msg += f"\n出错节点：{node_id}"
+        return msg, False
+
+    if fallback_allowed:
+        msg = (
+            f"找不到 WorkflowPrompt 里的工作流 `{workflow_name}`，或者 WorkflowPrompt 插件当前不可用。"
+            "\n我会尝试改走 `apiWorkflowPath` 降级执行。"
+        )
+        return msg, True
+
+    summary = error_message or error_details or body_text.strip()
+    if summary:
+        summary = summary[:200]
+        return f"执行失败：ComfyUI 返回了错误。{summary}", False
+    code = status_code if status_code is not None else "unknown"
+    return f"执行失败：ComfyUI 返回错误（HTTP {code}）。", False
 
 
 def _b64url_json_decode(data: str) -> dict[str, Any] | None:
@@ -1124,13 +1191,16 @@ async def run_workflow(
     view_id: str | None,
     params: dict[str, Any],
     table_key: str | None,
+    allow_default_table_fallback: bool = True,
 ) -> str | None:
-    resolved_table_key = table_key or ctx.default_table_key
     cfg_for_wf = (ctx.config.get("workflows") or {}).get(workflow_key) or {}
+    resolved_table_key = table_key
     if not table_key and isinstance(cfg_for_wf, dict):
         tk = cfg_for_wf.get("table")
         if isinstance(tk, str) and tk:
             resolved_table_key = tk
+    if not resolved_table_key and allow_default_table_fallback:
+        resolved_table_key = ctx.default_table_key
 
     provider = str(cfg_for_wf.get("provider") or "comfyui").strip().lower() if isinstance(cfg_for_wf, dict) else "comfyui"
 
@@ -1491,19 +1561,6 @@ async def run_workflow(
                 workflow_id = str(rh.get("workflowId") or cfg_for_wf.get("workflowId") or "").strip()
                 if not workflow_id:
                     raise RuntimeError("missing runninghub workflowId")
-                _dbg_emit(
-                    "dispatcher.runninghub.create_task.start",
-                    record_id=record_id,
-                    workflow_key=workflow_key,
-                    table_key=resolved_table_key,
-                    mode=mode,
-                    has_webhook=bool(webhook_url),
-                    workflow_id=workflow_id,
-                    node_info_len=len(node_info_list) if isinstance(node_info_list, list) else None,
-                    split_active=split_active,
-                    split_group=split_group,
-                    split_index=idx,
-                )
                 created = await runninghub_client.create_task(
                     workflow_id=workflow_id,
                     node_info_list=node_info_list,
@@ -1516,22 +1573,8 @@ async def run_workflow(
                     access_password=rh.get("accessPassword"),
                 )
                 prompt_id = created.task_id
-                _dbg_emit(
-                    "dispatcher.runninghub.create_task.done",
-                    record_id=record_id,
-                    workflow_key=workflow_key,
-                    table_key=resolved_table_key,
-                    prompt_id=prompt_id,
-                    raw_keys=sorted([str(k) for k in (created.raw or {}).keys()])[:40] if isinstance(created.raw, dict) else None,
-                )
                 if not prompt_id:
-                    _dbg_emit(
-                        "dispatcher.runninghub.task_id_missing",
-                        record_id=record_id,
-                        workflow_key=workflow_key,
-                        table_key=resolved_table_key,
-                        raw=created.raw if isinstance(created.raw, dict) else None,
-                    )
+                    logging.warning("runninghub create_task succeeded but task_id is missing: workflow=%s", workflow_key)
             else:
                 prompt_id = await queue_by_workflowprompt(
                     comfyui_client,
@@ -1660,10 +1703,24 @@ async def run_workflow(
             err_msg = f"HTTPError {status if status is not None else 'unknown'}: {e}"
         else:
             if status in (400, 404, 422):
-                if not wf.api_workflow_path:
+                user_msg, allow_fallback = _build_workflowprompt_user_error(
+                    workflow_name=getattr(wf, "workflow_name", workflow_key),
+                    status_code=status,
+                    body_text=body_text,
+                )
+                logging.warning(
+                    "workflowprompt failed: workflow=%s status=%s allow_fallback=%s response=%s",
+                    getattr(wf, "workflow_name", workflow_key),
+                    status,
+                    allow_fallback,
+                    body_short,
+                )
+                if not allow_fallback:
+                    err_msg = user_msg
+                elif not wf.api_workflow_path:
                     err_msg = (
-                        f"WorkflowPrompt 返回 {status}（可能插件未安装/参数不兼容/工作流不存在），且该 workflow 未配置 apiWorkflowPath"
-                        + (f"\nresponse={body_short}" if body_short else "")
+                        user_msg
+                        + "\n但当前 workflow 没有配置 `apiWorkflowPath`，所以无法继续降级执行。"
                     )
                 else:
                     try:
@@ -1686,8 +1743,8 @@ async def run_workflow(
                         err_msg = None
                     except Exception as e2:
                         err_msg = (
-                            f"WorkflowPrompt 返回 {status}，已尝试降级执行 api_workflow_path 但失败: {e2}"
-                            + (f"\nresponse={body_short}" if body_short else "")
+                            user_msg
+                            + f"\n随后尝试 `apiWorkflowPath` 降级执行也失败了：{e2}"
                         )
             else:
                 err_msg = f"HTTPError {status if status is not None else 'unknown'}: {e}" + (f"\nresponse={body_short}" if body_short else "")
@@ -2285,23 +2342,35 @@ async def dispatch(ctx: AppContext, *, name: str, args: dict[str, Any], trigger:
         record_id = _pick_record_id(args)
         row = _pick_row(args)
         view_id = _pick_view_id(args)
-        table_key = _pick_table_key(args)
+        explicit_table_key = _pick_table_key(args)
+        workflow_arg = _pick_workflow_key(args)
         workflow_key = _pick_workflow_key(args) if name == "wf" else (args.get("workflow") or "default")
         workflow_key = str(workflow_key) if workflow_key else "default"
+        allow_default_table = name == "run" and not workflow_arg
 
         if row and trigger.chat_id and (not ctx.bitable_mode.read_enabled) and ctx.bitable_configs and (ctx.settings.bitable_mode or "").strip().lower() not in ("off", "none", "disable", "disabled"):
             await _send_license_guidance(im, trigger)
             return
         
         if workflow_key == "default" and not ctx.workflows.get("default"):
-            resolved_table_key = table_key or ctx.default_table_key
+            resolved_table_key = _pick_table_key_for_workflow(
+                ctx,
+                args=args,
+                workflow_key=workflow_key,
+                allow_default=allow_default_table,
+            )
             picked = _pick_default_workflow_key(ctx, table_key=resolved_table_key)
             if picked:
                 workflow_key = picked
+        table_key = _pick_table_key_for_workflow(
+            ctx,
+            args=args,
+            workflow_key=workflow_key,
+            allow_default=allow_default_table,
+        )
 
         if not record_id and not row:
-            resolved_table_key = table_key or ctx.default_table_key
-            bitable = ctx.bitables.get(resolved_table_key) if resolved_table_key else None
+            bitable = ctx.bitables.get(table_key) if table_key else None
             
             if bitable and bitable.mode.read_enabled:
                 record_id = await bitable.find_next_queued_record_id()
@@ -2316,12 +2385,14 @@ async def dispatch(ctx: AppContext, *, name: str, args: dict[str, Any], trigger:
             view_id=view_id,
             params=params,
             table_key=table_key,
+            allow_default_table_fallback=allow_default_table,
         )
         await _send_text_by_trigger(im, trigger, f"已入队: {prompt_id or 'unknown'}")
         return
 
     if name in ("batch", "drain"):
-        base_table_key = _pick_table_key(args) or ctx.default_table_key
+        explicit_table_key = _pick_table_key(args)
+        base_table_key = explicit_table_key or ctx.default_table_key
         workflow_key = _pick_workflow_key(args) or str(args.get("workflow") or "")
         
         if not workflow_key:
@@ -2332,7 +2403,12 @@ async def dispatch(ctx: AppContext, *, name: str, args: dict[str, Any], trigger:
                 await _send_text_by_trigger(im, trigger, "缺少 workflow 且未找到默认工作流配置")
             return
             
-        table_key = _pick_table_key_for_workflow(ctx, args=args, workflow_key=workflow_key)
+        table_key = _pick_table_key_for_workflow(
+            ctx,
+            args=args,
+            workflow_key=workflow_key,
+            allow_default=True,
+        )
         if not table_key:
             if trigger.chat_id:
                 await _send_text_by_trigger(im, trigger, "缺少 table")
@@ -2367,12 +2443,18 @@ async def dispatch(ctx: AppContext, *, name: str, args: dict[str, Any], trigger:
 
     if name == "stop_queue":
         workflow_key = _pick_workflow_key(args) or str(args.get("workflow") or "")
-        base_table_key = _pick_table_key(args) or ctx.default_table_key
+        explicit_table_key = _pick_table_key(args)
+        base_table_key = explicit_table_key or ctx.default_table_key
         
         if not workflow_key:
             workflow_key = _pick_default_workflow_key(ctx, table_key=base_table_key) or "default"
 
-        table_key = _pick_table_key_for_workflow(ctx, args=args, workflow_key=workflow_key)
+        table_key = _pick_table_key_for_workflow(
+            ctx,
+            args=args,
+            workflow_key=workflow_key,
+            allow_default=True,
+        )
         if workflow_key and table_key:
             await ctx.runner.stop(workflow_key=workflow_key, table_key=table_key)
             if trigger.chat_id:
