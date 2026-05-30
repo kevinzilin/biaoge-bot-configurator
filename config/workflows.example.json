@@ -1,14 +1,15 @@
 {
-  "default_table": "klein_table",
-  "default_workflow": "klein_add_real_details_local",
+  "default_table": "gpt_test_table",
+  "default_workflow": "test-gpt-image",
   "tables": {
+    "_说明": "每个 key 是 table_key，供 /run table=xxx 或 trigger 使用。app_token/table_id 支持 ${ENV_VAR} 环境变量占位。",
     "klein_table": {
       "app_token": "${BITABLE_APP_TOKEN_KLEIN}",
       "table_id": "${BITABLE_TABLE_ID_KLEIN}",
       "view_id": "",
       "trigger": {
         "enabled": true,
-        "workflow": "klein_add_real_details_local",
+        "workflow": "klein_add_real_details",
         "user_field": "触发人"
       },
       "fields": {
@@ -16,7 +17,8 @@
         "output": "生成结果",
         "error": "错误信息",
         "prompt_id": "任务ID",
-        "created_time": "创建时间"
+        "created_time": "创建时间",
+        "task_name": "标题"
       },
       "status_values": {
         "queued": "待处理",
@@ -26,10 +28,64 @@
         "partial": "部分完成",
         "failed": "生成失败"
       }
+    },
+    "gpt_test_table": {
+      "app_token": "${BITABLE_APP_TOKEN_GPT}",
+      "table_id": "${BITABLE_TABLE_ID_GPT}",
+      "view_id": "",
+      "trigger": {
+        "enabled": true,
+        "workflow": "test-gpt-image",
+        "user_field": "操作人"
+      },
+      "fields": {
+        "status": "任务状态",
+        "output": "结果图",
+        "error": "错误信息",
+        "prompt_id": "任务ID",
+        "created_time": "创建时间",
+        "task_name": "产品名称"
+      },
+      "status_values": {
+        "queued": "待处理",
+        "trigger": "触发执行",
+        "running": "处理中",
+        "done": "已完成",
+        "partial": "部分完成",
+        "failed": "生成失败"
+      }
+    },
+    "runlog_table": {
+      "_说明": "运行日志表：记录每次工作流执行的详情，包括拆分批次、耗时、平台等。通过 workflow.runLogTable 关联。",
+      "app_token": "${BITABLE_APP_TOKEN_GPT}",
+      "table_id": "${BITABLE_TABLE_ID_RUNLOG}",
+      "view_id": "",
+      "fields": {
+        "source_record_id": "主记录id",
+        "source_table_key": "主表key",
+        "workflow_key": "工作流key",
+        "workflow_name": "工作流名称",
+        "run_group": "批次ID",
+        "run_total": "批次总数",
+        "run_index": "批次序号",
+        "provider": "平台",
+        "task_id": "任务ID",
+        "task_status": "任务状态",
+        "output": "生成结果",
+        "error_code": "错误码",
+        "error_message": "错误信息",
+        "submitted_at": "提交时间",
+        "finished_at": "完成时间",
+        "duration_sec": "耗时"
+      },
+      "status_values": {}
     }
   },
   "workflows": {
-    "klein_add_real_details_local": {
+    "_说明": "每个 key 是 workflow_key，供 /run workflow=xxx 或 trigger.workflow 使用。",
+
+    "klein_add_real_details": {
+      "_说明": "本地 ComfyUI + 单表绑定。不拆分，一次触发只跑一条记录。",
       "workflowName": "klein添加真实细节",
       "apiWorkflowPath": "d:\\\\www\\\\biaoge\\\\klein添加真实细节.json",
       "comfyuiBaseUrl": "http://127.0.0.1:8188",
@@ -58,144 +114,196 @@
           ],
           "type": "str"
         }
+      },
+      "defaults": {
+        "save_prefix_1": "ComfyUI_out_1",
+        "save_prefix_2": "ComfyUI_out_2"
       }
     },
-    "klein_add_real_details_private": {
-      "workflowName": "klein添加真实细节",
-      "apiWorkflowPath": "d:\\\\www\\\\biaoge\\\\klein添加真实细节.json",
-      "comfyuiBaseUrl": "http://<your-private-comfyui-host>:7001",
-      "table": "klein_table",
+
+    "test-gpt-image": {
+      "_说明": "本地 ComfyUI + 关联表拆分。relationPrompt.split=true 时，主表一条记录会按关联表行数拆成多个子任务，每个子任务注入对应行的参数值。结果回写到主记录时自动合并。",
+      "workflowName": "test-gpt-image",
+      "comfyuiBaseUrl": "http://127.0.0.1:8188",
+      "table": "gpt_test_table",
+      "runLogTable": "runlog_table",
       "recordFields": {
-        "prompt": "提示词",
-        "images": "参考图"
+        "images": "产品图",
+        "prompt": "产品信息"
       },
       "writeBackFields": {
-        "output": "生成结果",
+        "output": "结果图",
         "status": "任务状态",
         "error": "错误信息",
         "prompt_id": "任务ID"
       },
+      "relationPrompt": {
+        "sourceField": "选择屏数",
+        "targetParam": "prompt",
+        "split": true,
+        "maxItems": 20,
+        "joinWith": "\n",
+        "strict": true,
+        "enableItemParamMap": true,
+        "enablePromptFields": false,
+        "targetAppToken": "${BITABLE_APP_TOKEN_GPT}",
+        "targetTableId": "${BITABLE_TABLE_ID_SCREENS}",
+        "targetMatchField": "类型",
+        "itemParamMap": {
+          "prompt_general": "通用总控提示词",
+          "prompt_special": "专用生图提示词"
+        }
+      },
       "params": {
         "prompt": {
           "targets": [
-            { "nodeId": "449", "fieldName": "text" }
+            { "nodeId": "10", "fieldName": "positive" }
           ],
           "type": "str"
         },
         "images": {
           "targets": [
-            { "nodeId": "448", "fieldName": "image", "index": 0 },
-            { "nodeId": "481", "fieldName": "image", "index": 1 }
+            { "nodeId": "5", "fieldName": "image", "index": 0 }
           ],
           "type": "str"
+        },
+        "prompt_general": {
+          "targets": [
+            { "nodeId": "8", "fieldName": "positive" }
+          ]
+        },
+        "prompt_special": {
+          "type": "str",
+          "targets": [
+            { "nodeId": "9", "fieldName": "positive" }
+          ]
         }
-      }
+      },
+      "defaults": {}
     },
-    "klein_add_real_details_runninghub": {
+
+    "test-gpt-image-runninghub": {
+      "_说明": "RunningHub 远程平台。provider=runninghub 时走 RunningHub API 提交任务，支持 webhook 回调或本地轮询获取结果。",
       "provider": "runninghub",
-      "workflowName": "klein添加真实细节",
-      "table": "klein_table",
+      "workflowName": "test-gpt-rh",
+      "table": "gpt_test_table",
+      "runLogTable": "runlog_table",
       "runninghub": {
-        "workflowId": "1904136902449209346",
+        "workflowId": "2059674632478871553",
         "retainSeconds": 60,
         "instanceType": "plus",
         "usePersonalQueue": false,
         "addMetadata": true
       },
       "recordFields": {
-        "prompt": "提示词",
+        "prompt": "产品信息",
         "images": "参考图"
       },
       "writeBackFields": {
-        "output": "生成结果",
+        "output": "结果图",
         "status": "任务状态",
         "error": "错误信息",
         "prompt_id": "任务ID"
       },
+      "relationPrompt": {
+        "sourceField": "选择屏数",
+        "targetParam": "prompt",
+        "split": true,
+        "maxItems": 20,
+        "joinWith": "\n",
+        "strict": true,
+        "enableItemParamMap": true,
+        "enablePromptFields": false,
+        "targetAppToken": "${BITABLE_APP_TOKEN_GPT}",
+        "targetTableId": "${BITABLE_TABLE_ID_SCREENS}",
+        "targetMatchField": "类型",
+        "itemParamMap": {
+          "prompt_general": "通用总控提示词",
+          "prompt_special": "专用生图提示词",
+          "ratio": "输出比例"
+        }
+      },
       "params": {
         "prompt": {
           "targets": [
-            { "nodeId": "449", "fieldName": "text" }
+            { "nodeId": "10", "fieldName": "positive" }
           ],
           "type": "str"
         },
         "images": {
           "targets": [
-            { "nodeId": "448", "fieldName": "image", "index": 0 },
-            { "nodeId": "481", "fieldName": "image", "index": 1 }
+            { "nodeId": "5", "fieldName": "image", "index": 0 }
           ],
           "type": "str"
+        },
+        "prompt_general": {
+          "type": "str",
+          "targets": [
+            { "nodeId": "8", "fieldName": "positive" }
+          ]
+        },
+        "prompt_special": {
+          "type": "str",
+          "targets": [
+            { "nodeId": "9", "fieldName": "positive" }
+          ]
+        },
+        "ratio": {
+          "type": "str",
+          "targets": [
+            { "nodeId": "16", "fieldName": "positive" }
+          ]
         }
-      }
+      },
+      "defaults": {}
     },
-    "klein_add_real_details_bitable_off": {
-      "workflowName": "klein添加真实细节",
-      "apiWorkflowPath": "d:\\\\www\\\\biaoge\\\\klein添加真实细节.json",
+
+    "comfyui_simple_local": {
+      "_说明": "纯本地 ComfyUI，不绑定表格。通过 /run workflow=comfyui_simple_local 或飞书消息触发，结果直接发回聊天。",
+      "workflowName": "纯本地工作流",
+      "apiWorkflowPath": "d:\\\\www\\\\biaoge\\\\my_workflow.json",
       "comfyuiBaseUrl": "http://127.0.0.1:8188",
       "params": {
         "prompt": {
           "targets": [
-            { "nodeId": "449", "fieldName": "text" }
+            { "nodeId": "1", "fieldName": "text" }
           ],
           "type": "str"
         },
-        "images": {
+        "image": {
           "targets": [
-            { "nodeId": "448", "fieldName": "image", "index": 0 },
-            { "nodeId": "481", "fieldName": "image", "index": 1 }
+            { "nodeId": "2", "fieldName": "image" }
           ],
           "type": "str"
         }
-      }
+      },
+      "defaults": {}
     },
-    "klein_add_real_details_bitable_off_private": {
-      "workflowName": "klein添加真实细节",
-      "apiWorkflowPath": "d:\\\\www\\\\biaoge\\\\klein添加真实细节.json",
+
+    "comfyui_remote": {
+      "_说明": "远程/私有云 ComfyUI，不绑定表格。comfyuiBaseUrl 指向远程地址。",
+      "workflowName": "远程ComfyUI",
+      "apiWorkflowPath": "d:\\\\www\\\\biaoge\\\\my_workflow.json",
       "comfyuiBaseUrl": "http://<your-private-comfyui-host>:7001",
       "params": {
         "prompt": {
           "targets": [
-            { "nodeId": "449", "fieldName": "text" }
+            { "nodeId": "1", "fieldName": "text" }
           ],
           "type": "str"
         },
-        "images": {
+        "image": {
           "targets": [
-            { "nodeId": "448", "fieldName": "image", "index": 0 },
-            { "nodeId": "481", "fieldName": "image", "index": 1 }
+            { "nodeId": "2", "fieldName": "image" }
           ],
           "type": "str"
         }
-      }
-    },
-    "klein_add_real_details_bitable_off_runninghub": {
-      "provider": "runninghub",
-      "workflowName": "klein添加真实细节",
-      "runninghub": {
-        "workflowId": "1904136902449209346",
-        "retainSeconds": 60,
-        "instanceType": "plus",
-        "usePersonalQueue": false,
-        "addMetadata": true
       },
-      "params": {
-        "prompt": {
-          "targets": [
-            { "nodeId": "449", "fieldName": "text" }
-          ],
-          "type": "str"
-        },
-        "images": {
-          "targets": [
-            { "nodeId": "448", "fieldName": "image", "index": 0 },
-            { "nodeId": "481", "fieldName": "image", "index": 1 }
-          ],
-          "type": "str"
-        }
-      }
+      "defaults": {}
     }
   },
   "panel": {
+    "_说明": "飞书消息面板按钮。type: primary/danger/default，cmd 对应 / 指令名，args 为附加参数。",
     "title": "ComfyUI 控制面板",
     "rows": [
       [
@@ -206,21 +314,21 @@
           "args": {}
         },
         {
-          "text": "打开帮助",
-          "cmd": "help",
-          "type": "default",
+          "text": "执行队列",
+          "cmd": "drain",
+          "type": "danger",
           "args": {}
         }
       ],
       [
         {
-          "text": "执行队列(drain)",
-          "cmd": "drain",
-          "type": "danger",
+          "text": "帮助",
+          "cmd": "help",
+          "type": "default",
           "args": {}
         },
         {
-          "text": "查看上下文ID",
+          "text": "查看ID",
           "cmd": "ids",
           "type": "default",
           "args": {}

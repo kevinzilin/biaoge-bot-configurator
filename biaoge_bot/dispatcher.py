@@ -762,7 +762,7 @@ async def _download_attachments(
         if not token:
             continue
         file_name = it.get("name") or it.get("file_name") or it.get("fileName")
-        download_dir = ctx.settings.bitable_download_dir if provider == "runninghub" else (ctx.settings.bitable_download_dir if ctx.settings.comfyui_upload_enabled else (ctx.settings.comfyui_input_dir or ctx.settings.bitable_download_dir))
+        download_dir = ctx.settings.temp_download_dir if provider == "runninghub" else (ctx.settings.temp_download_dir if ctx.settings.comfyui_upload_enabled else (ctx.settings.comfyui_input_dir or ctx.settings.temp_download_dir))
         saved = await ctx.drive.download_media(file_token=str(token), download_dir=download_dir, file_name=str(file_name) if file_name else None)
         if provider == "runninghub":
             if not runninghub:
@@ -772,7 +772,7 @@ async def _download_attachments(
             if fv:
                 out.append(fv)
             try:
-                if os.path.exists(saved) and ctx.settings.bitable_download_dir in os.path.abspath(saved):
+                if os.path.exists(saved) and ctx.settings.temp_download_dir in os.path.abspath(saved):
                     os.remove(saved)
             except Exception:
                 pass
@@ -788,7 +788,7 @@ async def _download_attachments(
             sub = str(uploaded.get("subfolder") or "")
             out.append(f"{sub}/{name}" if sub else name)
             try:
-                if os.path.exists(saved) and ctx.settings.bitable_download_dir in os.path.abspath(saved):
+                if os.path.exists(saved) and ctx.settings.temp_download_dir in os.path.abspath(saved):
                     os.remove(saved)
             except Exception:
                 pass
@@ -996,7 +996,7 @@ async def _resolve_file_refs_in_params(
                 fname = str(info.get("file_name") or "").strip()
                 amid = str(info.get("message_id") or "").strip() or None
                 ext = Path(fname).suffix if fname else (".png" if akind == "image" else ".bin")
-                base_dir = str(ctx.settings.bitable_download_dir or "").strip() or os.getcwd()
+                base_dir = str(ctx.settings.temp_download_dir or "").strip() or os.getcwd()
                 tmp_dir = os.path.join(base_dir, "_im_attachments")
                 os.makedirs(tmp_dir, exist_ok=True)
                 tmp_path = os.path.join(tmp_dir, f"im_{akey[:12]}{ext}")
@@ -1049,7 +1049,7 @@ async def _resolve_file_refs_in_params(
                 fname = str(info.get("file_name") or "").strip()
                 amid = str(info.get("message_id") or "").strip() or None
                 ext = Path(fname).suffix if fname else (".png" if akind == "image" else ".bin")
-                base_dir = str(ctx.settings.bitable_download_dir or "").strip() or os.getcwd()
+                base_dir = str(ctx.settings.temp_download_dir or "").strip() or os.getcwd()
                 tmp_dir = os.path.join(base_dir, "_im_attachments")
                 os.makedirs(tmp_dir, exist_ok=True)
                 tmp_path = os.path.join(tmp_dir, f"im_{akey[:12]}{ext}")
@@ -1464,7 +1464,7 @@ async def run_workflow(
     split_max = 50
 
     temp_files: list[str] = []
-    base_download_dir = (ctx.settings.bitable_download_dir or "").strip()
+    base_download_dir = (ctx.settings.temp_download_dir or "").strip()
     if base_download_dir:
         base_abs = os.path.abspath(base_download_dir)
         for s in _collect_file_paths(merged):
@@ -1541,6 +1541,9 @@ async def run_workflow(
                 node_info_list = node_info_list + inline_node_info_list
 
             cb_ctx = dict(base_cb_ctx)
+            cb_ctx["run_group"] = run_group
+            cb_ctx["table_key_for_output"] = resolved_table_key
+            cb_ctx["workflow_key_for_output"] = workflow_key
             if split_values or split_items:
                 cb_ctx["split_group"] = split_group
                 cb_ctx["split_total"] = len(runs)
@@ -2112,6 +2115,9 @@ async def preview_workflow_runs(
     split_group = None
     if (split_values or split_items) and record_id:
         split_group = f"{record_id}_{int(time.time() * 1000)}"
+    run_group = split_group
+    if not run_group and record_id:
+        run_group = f"{record_id}_{int(time.time() * 1000)}"
 
     runs: list[Any] = split_items if split_items else (split_values if split_values else [None])
     out_runs: list[dict[str, Any]] = []
@@ -2126,6 +2132,9 @@ async def preview_workflow_runs(
         if inline_node_info_list:
             node_info_list = node_info_list + inline_node_info_list
         cb_ctx = dict(base_cb_ctx)
+        cb_ctx["run_group"] = run_group
+        cb_ctx["table_key_for_output"] = resolved_table_key
+        cb_ctx["workflow_key_for_output"] = workflow_key
         if split_values or split_items:
             cb_ctx["split_group"] = split_group
             cb_ctx["split_total"] = len(runs)

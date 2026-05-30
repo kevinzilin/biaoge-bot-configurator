@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 import time
 from dataclasses import dataclass
@@ -134,7 +135,13 @@ class QueueRunner:
                 pending = list(self._pending_remote.items())
             if not pending:
                 continue
-            for pid, info in pending[:50]:
+
+            # 一次取完所有 pending 项（上限 100），按提交时间排序让先提交的先处理
+            sorted_pending = sorted(pending, key=lambda kv: float(kv[1].get("created_at") or 0.0) if isinstance(kv[1], dict) else 0.0)
+            sorted_pending = sorted_pending[:100]
+
+            # 第一步：并发查询所有任务的状态，快速识别哪些已经完成
+            async def _query_one(pid: str, info: dict[str, Any]) -> dict[str, Any] | None:
                 if mode != "poll" and fallback > 0:
                     created_at = info.get("created_at")
                     try:
@@ -142,9 +149,8 @@ class QueueRunner:
                     except Exception:
                         created_at = 0.0
                     if created_at > 0 and (time.time() - created_at) < float(fallback):
-                        continue
+                        return None
                 provider = str(info.get("provider") or "").strip().lower()
-                payload: dict[str, Any] | None = None
                 try:
                     if provider == "runninghub":
                         from .runninghub import RunningHubClient
@@ -153,32 +159,63 @@ class QueueRunner:
                         q = await cli.query_results_v2(task_id=pid)
                         st = (q.status or "").strip().upper()
                         if st not in ("SUCCESS", "SUCCEEDED", "OK", "FAILED", "FAILURE", "ERROR"):
-                            continue
+                            return None
                         ok = st in ("SUCCESS", "SUCCEEDED", "OK")
-                        payload = {"provider": "runninghub", "prompt_id": pid, "completed": True, "status": "success" if ok else "failed"}
+                        payload: dict[str, Any] = {"provider": "runninghub", "prompt_id": pid, "completed": True, "status": "success" if ok else "failed"}
                         if not ok:
                             if q.error_message:
                                 payload["errorMessage"] = q.error_message
                             if q.error_code:
                                 payload["errorCode"] = q.error_code
-                        files: list[dict[str, Any]] = []
+                        rh_files: list[dict[str, Any]] = []
                         for it in q.results:
                             url = it.get("url")
                             if isinstance(url, str) and url.strip():
-                                files.append({"url": url.strip(), "outputType": it.get("outputType")})
-                        if files:
-                            payload["files"] = files
+                                rh_files.append({"url": url.strip(), "outputType": it.get("outputType")})
+                        if rh_files:
+                            payload["files"] = rh_files
+                        # 附加上下文
+                        cctx: dict[str, Any] | None = None
+                        async with self._lock:
+                            c = self._prompt_ctx.get(pid)
+                            if isinstance(c, dict):
+                                tk = str(c.get("table_key") or "").strip()
+                                cctx = {
+                                    "record_id": c.get("record_id"),
+                                    "recordId": c.get("record_id"),
+                                    "workflow": c.get("workflow_key"),
+                                    "tableKey": tk,
+                                    "chat_id": c.get("chat_id"),
+                                    "user_open_id": c.get("user_open_id"),
+                                    "runLogTableKey": c.get("run_log_table_key"),
+                                    "runLogRecordId": c.get("run_log_record_id"),
+                                    "runLogSubmittedAtMs": c.get("run_log_submitted_at_ms"),
+                                    "split_group": c.get("split_group"),
+                                    "split_total": c.get("split_total"),
+                                    "split_index": c.get("split_index"),
+                                    "append_output": c.get("append_output"),
+                                }
+                                if tk:
+                                    tcfg = ctx.bitable_configs.get(tk) if hasattr(ctx, "bitable_configs") else None
+                                    if tcfg:
+                                        if getattr(tcfg, "app_token", None):
+                                            cctx["appToken"] = tcfg.app_token
+                                        if getattr(tcfg, "table_id", None):
+                                            cctx["tableId"] = tcfg.table_id
+                        if cctx:
+                            payload["extra_data"] = {"callback_context": cctx}
+                        return payload
                     elif provider in ("comfyui", ""):
                         from .comfyui import ComfyUIClient
 
                         base_url = str(info.get("comfyui_base_url") or "").strip() or str(getattr(getattr(ctx, "settings", None), "comfyui_base_url", "") or "")
                         if not base_url:
-                            continue
+                            return None
                         cli = ComfyUIClient(base_url)
                         item = await cli.get_history_item(prompt_id=pid)
                         if not isinstance(item, dict):
-                            continue
-                        payload = {
+                            return None
+                        return {
                             "provider": "comfyui",
                             "prompt_id": pid,
                             "completed": True,
@@ -186,21 +223,35 @@ class QueueRunner:
                             "context": {"comfyui_base_url": base_url},
                             "result": item,
                         }
-                    else:
-                        continue
                 except Exception:
-                    continue
+                    logging.exception("poller: query failed for prompt_id=%s provider=%s", pid, provider)
+                return None
 
-                if not payload:
-                    continue
-                try:
-                    from .callback_server import handle_callback_payload
+            # 并发查询所有 pending 任务的状态
+            results = await asyncio.gather(
+                *[_query_one(pid, info) for pid, info in sorted_pending],
+                return_exceptions=True,
+            )
 
-                    await handle_callback_payload(ctx, payload)
-                except Exception:
-                    pass
-                async with self._lock:
-                    self._pending_remote.pop(pid, None)
+            # 第二步：并发处理已完成的回调（最多 5 个并行）
+            # 所有任务在 3 方平台都已完成，download + upload + writeback 各自独立，并发执行
+            _cb_sem = asyncio.Semaphore(10)
+
+            async def _process_one(payload: dict[str, Any]) -> None:
+                pid = payload.get("prompt_id")
+                async with _cb_sem:
+                    try:
+                        from .callback_server import handle_callback_payload
+                        await handle_callback_payload(ctx, payload)
+                    except Exception:
+                        logging.exception("poller: handle_callback_payload failed for prompt_id=%s", pid)
+                    async with self._lock:
+                        self._pending_remote.pop(pid, None)
+
+            await asyncio.gather(
+                *[_process_one(p) for p in results if isinstance(p, dict)],
+                return_exceptions=True,
+            )
 
     def _run_key(self, table_key: str, workflow_key: str) -> str:
         return f"{table_key}::{workflow_key}"
@@ -269,7 +320,7 @@ class QueueRunner:
             if not self._ctx:
                 raise RuntimeError("runner not initialized")
             b = max(1, min(int(batch), 200))
-            i = max(1, min(int(inflight), 8))
+            i = max(1, min(int(inflight), 20))
             for k0, st0 in list(self._runs.items()):
                 if not st0 or not st0.active:
                     continue
@@ -354,7 +405,7 @@ class QueueRunner:
                 st.prompt_to_record.pop(prompt_id, None)
 
         if temp_files and self._ctx:
-            base_dir = str(getattr(getattr(self._ctx, "settings", None), "bitable_download_dir", "") or "").strip()
+            base_dir = str(getattr(getattr(self._ctx, "settings", None), "temp_download_dir", "") or "").strip()
             if base_dir:
                 base_dir_abs = os.path.abspath(base_dir)
                 for fp in temp_files:

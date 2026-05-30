@@ -13,7 +13,7 @@ downloads/
 config/workflows.local.json
 config/workflows.*.local.json
 config/workflows.*.local.*
-
+output/
 scripts/
 python_3.12_代码加密/
 未加密源码/

@@ -40,7 +40,8 @@ class Settings:
     bitable_table_id: str
     bitable_mode: str
     comfyui_input_dir: str | None
-    bitable_download_dir: str
+    temp_download_dir: str
+    result_output_dir: str
     comfyui_base_url: str
     comfyui_upload_enabled: bool
     comfyui_upload_subfolder: str | None
@@ -91,7 +92,8 @@ def load_settings(env_path: str | None = None) -> Settings:
         bitable_table_id=os.environ.get("BITABLE_TABLE_ID", "").strip(),
         bitable_mode=os.environ.get("BITABLE_MODE", "auto").strip().lower(),
         comfyui_input_dir=(os.environ.get("COMFYUI_INPUT_DIR", "").strip() or None),
-        bitable_download_dir=os.environ.get("BITABLE_DOWNLOAD_DIR", r"d:\www\biaoge\downloads").strip(),
+        temp_download_dir=os.path.join(os.getcwd(), "temp_downloads"),
+        result_output_dir=os.environ.get("RESULT_OUTPUT_DIR", "").strip(),
         comfyui_base_url=os.environ.get("COMFYUI_BASE_URL", "http://127.0.0.1:8188").strip(),
         comfyui_upload_enabled=to_bool(os.environ.get("COMFYUI_UPLOAD_ENABLED", "0")),
         comfyui_upload_subfolder=(os.environ.get("COMFYUI_UPLOAD_SUBFOLDER", "").strip() or None),

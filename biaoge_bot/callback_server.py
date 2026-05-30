@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -273,7 +274,7 @@ async def _download_from_view(ctx: AppContext, *, base_url: str, filename: str, 
         base = ctx.settings.comfyui_base_url.rstrip("/")
     if not base:
         return None
-    save_dir = ctx.settings.bitable_download_dir
+    save_dir = ctx.settings.temp_download_dir
     os.makedirs(save_dir, exist_ok=True)
     name = _safe_filename(filename)
     prefix = _safe_filename(prompt_id or "prompt")
@@ -301,7 +302,7 @@ async def _download_from_url(ctx: AppContext, *, url: str, prompt_id: str | None
     u = (url or "").strip()
     if not _is_http_url(u):
         return None
-    save_dir = ctx.settings.bitable_download_dir
+    save_dir = ctx.settings.temp_download_dir
     os.makedirs(save_dir, exist_ok=True)
     name = (filename or "").strip()
     if not name:
@@ -1792,9 +1793,56 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
         elif prompt_id:
             await _notify_text(im, ("已完成" if ok else "失败") + f" prompt={prompt_id}")
 
+    # 如果配置了结果输出目录，从临时目录复制结果
+    if ctx.settings.result_output_dir and file_paths:
+        tk = str(cb_ctx.get("table_key_for_output") or table_key or "").strip()
+        wk = str(cb_ctx.get("workflow_key_for_output") or workflow_name or "").strip()
+        rid = str(record_id or "")
+
+        # 尝试从 fields.name 获取可读名称
+        name_value = ""
+        if tk and rid and bitable and getattr(bitable, "mode", None) and getattr(bitable.mode, "read_enabled", False):
+            try:
+                fields_cfg = dict(getattr(table_cfg, "fields", {}) or {})
+                name_column = fields_cfg.get("task_name")
+                if isinstance(name_column, str) and name_column.strip():
+                    rec = await bitable.get_record(rid)
+                    fv = rec.get("fields") if isinstance(rec, dict) else {}
+                    nv = fv.get(name_column.strip()) if isinstance(fv, dict) else None
+                    if isinstance(nv, str) and nv.strip():
+                        name_value = nv.strip()
+                    elif isinstance(nv, list) and nv:
+                        first = nv[0]
+                        if isinstance(first, dict):
+                            name_value = first.get("text") or first.get("name") or str(first)
+                        elif isinstance(first, str):
+                            name_value = first
+            except Exception:
+                pass
+
+        if name_value:
+            folder_name = _safe_filename(f"{tk}-{wk}-{name_value}")
+        elif rid:
+            folder_name = _safe_filename(f"{tk}-{wk}-{rid[:12]}")
+        else:
+            folder_name = _safe_filename(f"{tk}-{wk}")
+
+        result_dir = ctx.settings.result_output_dir
+        if not os.path.isabs(result_dir):
+            result_dir = os.path.join(os.getcwd(), result_dir)
+        dest_dir = os.path.join(result_dir, folder_name)
+        os.makedirs(dest_dir, exist_ok=True)
+
+        for fp in file_paths:
+            try:
+                if fp and os.path.exists(fp):
+                    shutil.copy2(fp, dest_dir)
+            except Exception:
+                pass
+
     for fp in file_paths:
         try:
-            if fp and os.path.exists(fp) and ctx.settings.bitable_download_dir in os.path.abspath(fp):
+            if fp and os.path.exists(fp) and ctx.settings.temp_download_dir in os.path.abspath(fp):
                 os.remove(fp)
         except Exception:
             pass

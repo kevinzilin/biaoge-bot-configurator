@@ -491,7 +491,7 @@ _PAGE_HTML = r"""
     "COMFYUI_UPLOAD_ENABLED": "是否允许上传图片到 ComfyUI（1/0）。",
     "COMFYUI_UPLOAD_SUBFOLDER": "上传到 ComfyUI 的子目录（可选）。",
     "COMFYUI_UPLOAD_OVERWRITE": "上传同名文件时是否覆盖（true/false）。",
-    "BITABLE_DOWNLOAD_DIR": "多维表格/附件下载的本地目录。",
+    "RESULT_OUTPUT_DIR": "结果输出目录（可选）。填绝对/相对路径时保存生成结果，不填则只做临时中转不落盘。示例：E:/biaoge/output 或 ./output（统一用正斜杠 /，不要用反斜杠 \\）。",
     "REMOTE_CALLBACK_URL": "公网/远程回调地址（可选）。适用于外部服务能回调到你指定的地址的情况。",
     "REMOTE_RESULT_MODE": "远程结果获取模式（例如 poll/fc）。",
     "REMOTE_POLL_INTERVAL_SECONDS": "远程轮询间隔（秒），过小可能导致请求过频。",
@@ -504,7 +504,7 @@ _PAGE_HTML = r"""
     selected: {type: "env", key: ""},
   };
   const PARAM_TYPE_OPTIONS = ["str", "int", "float", "bool"];
-  const TABLE_FIELD_KEY_OPTIONS = ["status", "output", "error", "prompt_id", "created_time"];
+  const TABLE_FIELD_KEY_OPTIONS = ["status", "output", "error", "prompt_id", "created_time", "task_name"];
   const STATUS_VALUE_KEY_OPTIONS = ["queued", "trigger", "running", "done", "partial", "failed"];
   let CURRENT = null;
 
@@ -1223,7 +1223,7 @@ _PAGE_HTML = r"""
           ]),
           el("div", {class:"form"}, [
             fields,
-            el("div", {class:"help", text:"字段映射：key 为系统字段名，value 为多维表格列名。KEY 现在支持下拉选择，也可以手填。常用项：status（任务状态）、output（生成结果）、error（错误信息）、prompt_id（prompt_id/任务ID）、created_time（创建时间）。"}),
+            el("div", {class:"help", text:"字段映射：key 为系统字段名，value 为多维表格列名。KEY 支持下拉选择，也可手填。全部系统字段：status（任务状态）、output（生成结果）、error（错误信息）、prompt_id（任务ID）、created_time（创建时间）、task_name（标题/任务名称，用于结果文件夹命名）。"}),
           ]),
         ]),
         el("div", {class:"block"}, [
