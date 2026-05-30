@@ -1,10 +1,10 @@
 @echo off
-setlocal EnableExtensions
+setlocal
 cd /d "%~dp0"
 
 if exist ".venv\Scripts\python.exe" goto :run
 echo.
-echo Virtual env (.venv) not found. Please run install.cmd first.
+echo Virtual env [.venv] not found. Please run install.cmd first.
 pause
 exit /b 1
 

@@ -504,7 +504,7 @@ _PAGE_HTML = r"""
     selected: {type: "env", key: ""},
   };
   const PARAM_TYPE_OPTIONS = ["str", "int", "float", "bool"];
-  const TABLE_FIELD_KEY_OPTIONS = ["status", "output", "error", "prompt_id", "created_time", "trigger_cmd", "trigger_user"];
+  const TABLE_FIELD_KEY_OPTIONS = ["status", "output", "error", "prompt_id", "created_time"];
   const STATUS_VALUE_KEY_OPTIONS = ["queued", "trigger", "running", "done", "partial", "failed"];
   let CURRENT = null;
 
@@ -891,14 +891,6 @@ _PAGE_HTML = r"""
       item.onclick = () => select("panel", "root");
       globalList.appendChild(item);
     }
-    {
-      const active = STATE.selected.type === "automation";
-      const item = el("button", {type:"button", class:"sideItem" + (active ? " active" : "")}, [
-        el("div", {class:"sideKey", text:"automation"}),
-      ]);
-      item.onclick = () => select("automation", "root");
-      globalList.appendChild(item);
-    }
 
     const tables = (STATE.cfg && STATE.cfg.tables) ? STATE.cfg.tables : {};
     const tableList = $("tableList");
@@ -1098,69 +1090,6 @@ _PAGE_HTML = r"""
       return;
     }
 
-    if (t === "automation") {
-      const orig = (STATE.cfg && STATE.cfg.automation && typeof STATE.cfg.automation === "object") ? STATE.cfg.automation : {};
-      const triggerCmdField = el("input", {
-        type:"text",
-        value: String(orig.trigger_cmd_field || orig.triggerCmdField || orig.trigger_field || orig.triggerField || orig.cmd_field || orig.cmdField || ""),
-        placeholder:"例如：触发指令",
-      });
-      const triggerUserField = el("input", {
-        type:"text",
-        value: String(orig.trigger_user_field || orig.triggerUserField || orig.operator_field || orig.operatorField || ""),
-        placeholder:"例如：触发人（可选）",
-      });
-
-      root.appendChild(el("div", {class:"sectionHeader"}, [
-        el("div", null, [el("h2", {text:"automation"}), el("div", {class:"help", text:"配置表格事件触发的全局兜底字段名。优先级是：table.fields 里的单表配置优先，automation 只在表里没写时才会生效。"})]),
-      ]));
-
-      root.appendChild(el("div", {class:"form"}, [
-        el("div", {class:"block bitableOnly"}, [
-          el("div", {class:"blockTitle"}, [
-            el("div", {class:"blockTitleLeft"}, [
-              el("span", {class:"pill", text:"触发"}),
-              el("div", {class:"blockTitleText", text:"automation"}),
-              el("div", {class:"blockTitleSub", text:"表格触发执行的全局默认字段"}),
-            ]),
-          ]),
-          el("div", {class:"form"}, [
-            el("div", {class:"field"}, [
-              el("div", {class:"label", text:"trigger_cmd_field"}),
-              triggerCmdField,
-              el("div", {class:"help", text:"全局默认的“触发指令”列名。只有 tables.xxx.fields 没写 trigger_cmd 时，才会退回用这里。"}),
-            ]),
-            el("div", {class:"field"}, [
-              el("div", {class:"label", text:"trigger_user_field（可选）"}),
-              triggerUserField,
-              el("div", {class:"help", text:"全局默认的“触发人”列名。只有事件里拿不到 operator_open_id，且 tables.xxx.fields 没写 trigger_user 时，才会退回用这里。推荐使用人员字段；留空表示不用这条兜底链路。"}),
-            ]),
-          ]),
-        ]),
-      ]));
-
-      CURRENT = {
-        commit: () => {
-          const out = deepCopy(orig);
-          const cmdField = (triggerCmdField.value || "").trim();
-          const userField = (triggerUserField.value || "").trim();
-          if (cmdField) out.trigger_cmd_field = cmdField; else delete out.trigger_cmd_field;
-          delete out.triggerCmdField;
-          delete out.trigger_field;
-          delete out.triggerField;
-          delete out.cmd_field;
-          delete out.cmdField;
-          if (userField) out.trigger_user_field = userField; else delete out.trigger_user_field;
-          delete out.triggerUserField;
-          delete out.operator_field;
-          delete out.operatorField;
-          if (Object.keys(out).length) STATE.cfg.automation = out;
-          else delete STATE.cfg.automation;
-        }
-      };
-      return;
-    }
-
     if (t === "env") {
       const v = (STATE.env && key in STATE.env) ? String(STATE.env[key] || "") : "";
       const desc = ENV_DESC[key] || "配置说明待补充。";
@@ -1195,6 +1124,15 @@ _PAGE_HTML = r"""
       const appToken = el("input", {type:"text", value: String(orig.app_token || "")});
       const tableId = el("input", {type:"text", value: String(orig.table_id || "")});
       const viewId = el("input", {type:"text", value: String(orig.view_id || "")});
+      const triggerOrig0 = (orig.trigger && typeof orig.trigger === "object") ? orig.trigger : {};
+      const triggerEnabled = el("input", {type:"checkbox", class:"switch"});
+      triggerEnabled.checked = !!triggerOrig0.enabled;
+      triggerEnabled.disabled = (mode === "write");
+      const triggerWorkflow = el("input", {type:"text", value: String(triggerOrig0.workflow || orig.trigger_workflow || orig.triggerWorkflow || "")});
+      const triggerUserField = el("input", {type:"text", value: String(triggerOrig0.user_field || triggerOrig0.userField || "")});
+      const wfDataListId = "dl_table_trigger_workflow";
+      triggerWorkflow.setAttribute("list", wfDataListId);
+      const dlWf = el("datalist", {id: wfDataListId}, Object.keys((STATE.cfg && STATE.cfg.workflows) ? STATE.cfg.workflows : {}).sort().map(k2 => el("option", {value: k2})));
       const fields = kvEditor(
         orig.fields || {},
         "字段key(如 status)",
@@ -1242,6 +1180,42 @@ _PAGE_HTML = r"""
         el("div", {class:"block"}, [
           el("div", {class:"blockTitle"}, [
             el("div", {class:"blockTitleLeft"}, [
+              el("span", {class:"pill", text:"触发"}),
+              el("div", {class:"blockTitleText", text:"trigger"}),
+              el("div", {class:"blockTitleSub", text:"开关 + 选择触发时执行的 workflow"}),
+            ]),
+          ]),
+          (() => {
+            const cfgWrap = el("div", {class:"form"}, [
+              el("div", {class:"field"}, [
+                el("div", {class:"label", text:"启用"}),
+                triggerEnabled,
+                el("div", {class:"help", text:(mode === "write") ? "BITABLE_MODE=write：无法读表，不支持触发。" : "开启后：当记录状态变为 trigger（默认“触发执行”）时，自动执行所选 workflow。"}),
+              ]),
+              el("div", {class:"field"}, [
+                el("div", {class:"label", text:"workflow"}),
+                triggerWorkflow,
+                el("div", {class:"help", text:"要触发执行的 workflow key（对应 workflows）。留空会自动按该表匹配 default_workflow。"}),
+              ]),
+              el("div", {class:"field"}, [
+                el("div", {class:"label", text:"user_field（可选）"}),
+                triggerUserField,
+                el("div", {class:"help", text:"可选：表格里“触发人”这一列的列名。作用：当事件里拿不到 operator_open_id 时，从该列读取 open_id 来触发执行。建议把这列做成【人员】类型字段。留空表示：必须依赖事件自带的 operator_open_id。"}),
+              ]),
+            ]);
+            function applyVis() {
+              const show = triggerEnabled.checked;
+              triggerWorkflow.parentElement.style.display = show ? "" : "none";
+              triggerUserField.parentElement.style.display = show ? "" : "none";
+            }
+            triggerEnabled.onchange = applyVis;
+            applyVis();
+            return cfgWrap;
+          })(),
+        ]),
+        el("div", {class:"block"}, [
+          el("div", {class:"blockTitle"}, [
+            el("div", {class:"blockTitleLeft"}, [
               el("span", {class:"pill", text:"映射"}),
               el("div", {class:"blockTitleText", text:"fields"}),
               el("div", {class:"blockTitleSub", text:"系统字段名 -> 多维表格列名"}),
@@ -1249,7 +1223,7 @@ _PAGE_HTML = r"""
           ]),
           el("div", {class:"form"}, [
             fields,
-            el("div", {class:"help", text:"字段映射：key 为系统字段名，value 为多维表格列名。KEY 现在支持下拉选择，也可以手填。常用项：status（任务状态）、output（生成结果）、error（错误信息）、prompt_id（prompt_id/任务ID）、created_time（创建时间）、trigger_cmd（触发指令）、trigger_user（触发人，可选）。"}),
+            el("div", {class:"help", text:"字段映射：key 为系统字段名，value 为多维表格列名。KEY 现在支持下拉选择，也可以手填。常用项：status（任务状态）、output（生成结果）、error（错误信息）、prompt_id（prompt_id/任务ID）、created_time（创建时间）。"}),
           ]),
         ]),
         el("div", {class:"block"}, [
@@ -1266,6 +1240,7 @@ _PAGE_HTML = r"""
           ]),
         ]),
       ]));
+      root.appendChild(dlWf);
 
       CURRENT = {
         commit: () => {
@@ -1275,6 +1250,16 @@ _PAGE_HTML = r"""
           out.app_token = (appToken.value || "").trim();
           out.table_id = (tableId.value || "").trim();
           out.view_id = (viewId.value || "").trim();
+          const trigWf = (triggerWorkflow.value || "").trim();
+          const trigUserField = (triggerUserField.value || "").trim();
+          const trigEnabled = !!triggerEnabled.checked;
+          if (trigEnabled || trigWf || trigUserField) {
+            const obj = {enabled: trigEnabled};
+            if (trigWf) obj.workflow = trigWf;
+            if (trigUserField) obj.user_field = trigUserField;
+            out.trigger = obj;
+          }
+          else delete out.trigger;
           out.fields = fields._getValue();
           out.status_values = statusValues._getValue();
           if (newKey !== key) {
@@ -1847,7 +1832,6 @@ _PAGE_HTML = r"""
     $("wfPath").textContent = "path: " + String(wf.path || "");
     if (!STATE.cfg.tables) STATE.cfg.tables = {};
     if (!STATE.cfg.workflows) STATE.cfg.workflows = {};
-    if (!STATE.cfg.automation || typeof STATE.cfg.automation !== "object") STATE.cfg.automation = {};
 
     const firstEnv = Object.keys(STATE.env || {}).sort()[0] || "";
     if (!STATE.selected.key) STATE.selected = {type:"env", key:firstEnv};

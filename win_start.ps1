@@ -66,10 +66,114 @@ function Update-DotEnv {
 
   Set-Content -LiteralPath $Path -Value $outLines -Encoding ASCII
 }
+
+function New-RandomToken {
+  $bytes = [byte[]]::new(16)
+  [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+  return [System.Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '_').Replace('/', '-')
+}
+
+$WORKFLOWS_LOCAL_SKELETON = @'
+{
+  "_comment": "Minimal config skeleton. See config/workflows.example.json for full reference.",
+  "default_table": "",
+  "default_workflow": "",
+  "tables": {},
+  "automation": {},
+  "workflows": {}
+}
+'@
+
+function Ensure-WorkflowsLocalConfig {
+  param([Parameter(Mandatory = $true)] [string] $RootDir)
+  $localPath = Join-Path $RootDir "config\workflows.local.json"
+  if (-not (Test-Path $localPath)) {
+    $dir = Split-Path -Parent $localPath
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    Set-Content -LiteralPath $localPath -Value $WORKFLOWS_LOCAL_SKELETON.Trim() -Encoding UTF8
+    Write-Host "Created config\workflows.local.json (minimal skeleton)" -ForegroundColor Green
+  }
+}
+
+$REQUIRED_ENV_KEYS = @(
+  ,@("FEISHU_APP_ID", "Feishu App ID")
+  ,@("FEISHU_APP_SECRET", "Feishu App Secret")
+)
+
+$OPTIONAL_ENV_KEYS = @(
+  ,@("ADMIN_TOKEN", "Admin token (leave blank to auto-generate)")
+)
+
+function Ensure-RequiredConfig {
+  param([Parameter(Mandatory = $true)] [string] $RootDir)
+  $envPath = Join-Path $RootDir ".env"
+  $envMap = Read-DotEnv -Path $envPath
+
+  $missing = @()
+  foreach ($entry in $REQUIRED_ENV_KEYS) {
+    $key = $entry[0]; $desc = $entry[1]
+    $val = ""
+    if ($envMap.ContainsKey($key)) { $val = ($envMap[$key] -as [string]).Trim() }
+    if (-not $val) { $missing += ,@($key, $desc, $true) }
+  }
+  foreach ($entry in $OPTIONAL_ENV_KEYS) {
+    $key = $entry[0]; $desc = $entry[1]
+    $val = ""
+    if ($envMap.ContainsKey($key)) { $val = ($envMap[$key] -as [string]).Trim() }
+    if (-not $val) { $missing += ,@($key, $desc, $false) }
+  }
+
+  if ($missing.Count -eq 0) { return $true }
+
+  Write-Host ""
+  Write-Host ("=" * 60)
+  Write-Host "  Missing configuration. Please enter values below:"
+  Write-Host "  (Ctrl+C to cancel)"
+  Write-Host ("=" * 60)
+
+  $updates = @{}
+  foreach ($entry in $missing) {
+    $key = $entry[0]; $desc = $entry[1]; $required = $entry[2]
+    Write-Host ""
+    Write-Host ("  [" + $desc + "]")
+    $value = Read-Host -Prompt ("  " + $key + " =")
+    $value = $value.Trim()
+    if (-not $value) {
+      if ($required) {
+        Write-Host ""
+        Write-Host ("  ! " + $key + " is required. Cancelled.") -ForegroundColor Yellow
+        return $false
+      }
+      $value = New-RandomToken
+      Write-Host ("  -> Auto-generated: " + $value) -ForegroundColor Green
+    }
+    $updates[$key] = $value
+  }
+
+  # Copy .env.example if .env does not exist
+  if (-not (Test-Path $envPath)) {
+    $examplePath = Join-Path $RootDir ".env.example"
+    if (Test-Path $examplePath) {
+      Copy-Item -LiteralPath $examplePath -Destination $envPath -Force
+    }
+  }
+
+  Update-DotEnv -Path $envPath -Updates $updates
+
+  foreach ($k in $updates.Keys) {
+    [Environment]::SetEnvironmentVariable($k, $updates[$k], "Process")
+  }
+
+  Write-Host ""
+  Write-Host "  Saved to .env" -ForegroundColor Green
+  Write-Host ""
+  return $true
+}
+
 $venvPy = Join-Path $root ".venv\Scripts\python.exe"
 if (-not (Test-Path $venvPy)) {
   Write-Host ""
-  Write-Host "Virtual env (.venv) not found. Please run install.cmd first." -ForegroundColor Yellow
+  Write-Host "Virtual env (.venv) not found. Please run win_install.ps1 first." -ForegroundColor Yellow
   exit 1
 }
 
@@ -118,7 +222,7 @@ function Fix-VenvPyvenvCfg {
   }
 
   if (-not $needFix) { return }
-  
+
   $pickedExe = ""
   $candidates = @()
   if ($PythonExe) { $candidates += $PythonExe }
@@ -269,17 +373,35 @@ try {
 
 $envMap = Read-DotEnv -Path (Join-Path $root ".env")
 
+# --- Fix / resolve WORKFLOW_CONFIG_PATH ---
 if ($envMap.ContainsKey("WORKFLOW_CONFIG_PATH")) {
   $raw = ($envMap["WORKFLOW_CONFIG_PATH"] -as [string]).Trim()
   $wf = $raw.Trim('"')
-  if ($wf -and (-not (Test-Path $wf))) {
-    $leaf = ""
-    try { $leaf = Split-Path -Leaf $wf } catch { $leaf = "" }
+  $configDir = Join-Path $root "config"
+  $envPath = Join-Path $root ".env"
+
+  # Resolve relative path to absolute based on project root
+  if ($wf -and (-not [System.IO.Path]::IsPathRooted($wf))) {
+    $wf = Join-Path $root $wf
+  }
+
+  # Path exists -> write absolute path back to .env
+  if ($wf -and (Test-Path $wf)) {
+    try { $absPath = (Resolve-Path -LiteralPath $wf).Path } catch { $absPath = $wf }
+    if ($absPath -ne $raw) {
+      Update-DotEnv -Path $envPath -Updates @{ WORKFLOW_CONFIG_PATH = $absPath }
+      $envMap["WORKFLOW_CONFIG_PATH"] = $absPath
+      Write-Host ("WORKFLOW_CONFIG_PATH -> " + $absPath) -ForegroundColor Green
+    }
+  } else {
+    # Path missing -> search for alternatives in config dir
     $cands = @()
-    $configDir = Join-Path $root "config"
-    if ($wf -and (-not [System.IO.Path]::IsPathRooted($wf))) { $cands += (Join-Path $root $wf) } else { $cands += $wf }
-    if ($leaf) { $cands += (Join-Path $configDir $leaf) }
-    $cands += (Join-Path $configDir "workflows.loca.json")
+    if ($wf) {
+      $leaf = ""
+      try { $leaf = Split-Path -Leaf $wf } catch {}
+      if ($leaf) { $cands += (Join-Path $configDir $leaf) }
+    }
+    $cands += (Join-Path $configDir "workflows.local.json")
     $cands += (Join-Path $configDir "workflows.example.json")
 
     $picked = ""
@@ -290,16 +412,22 @@ if ($envMap.ContainsKey("WORKFLOW_CONFIG_PATH")) {
 
     if ($picked) {
       try { $picked = (Resolve-Path -LiteralPath $picked).Path } catch {}
-      Update-DotEnv -Path (Join-Path $root ".env") -Updates @{ WORKFLOW_CONFIG_PATH = $picked }
+      Update-DotEnv -Path $envPath -Updates @{ WORKFLOW_CONFIG_PATH = $picked }
       $envMap["WORKFLOW_CONFIG_PATH"] = $picked
       Write-Host ("WORKFLOW_CONFIG_PATH fixed -> " + $picked) -ForegroundColor Green
     } else {
-      Update-DotEnv -Path (Join-Path $root ".env") -Updates @{ WORKFLOW_CONFIG_PATH = "" }
+      # Clear path so bot falls back to default (config/workflows.local.json)
+      Update-DotEnv -Path $envPath -Updates @{ WORKFLOW_CONFIG_PATH = "" }
       $envMap["WORKFLOW_CONFIG_PATH"] = ""
       Write-Host "WORKFLOW_CONFIG_PATH not found, cleared to allow startup." -ForegroundColor Yellow
     }
   }
 }
+
+# --- Ensure workflows.local.json exists ---
+try {
+  Ensure-WorkflowsLocalConfig -RootDir $root
+} catch {}
 
 $cbHost = "127.0.0.1"
 $cbPort = 9901
@@ -319,13 +447,24 @@ try {
   if ($listening) {
     Write-Host ""
     Write-Host ("Port already in use: " + $cbHost + ":" + $cbPort) -ForegroundColor Yellow
-    Write-Host "Please close the existing process, or change CALLBACK_PORT in .env, then run start.cmd again." -ForegroundColor Yellow
+    Write-Host "Please close the existing process, or change CALLBACK_PORT in .env, then re-run." -ForegroundColor Yellow
     exit 1
   }
 } catch {}
 
+# --- Ensure required config ---
+$configOk = Ensure-RequiredConfig -RootDir $root
+if (-not $configOk) { exit 1 }
+
+# Re-read .env after interactive config may have written new values
+$envMap = Read-DotEnv -Path (Join-Path $root ".env")
+
 Write-Host "Starting biaoge_bot ..." -ForegroundColor Cyan
-Write-Host ("Config page: http://" + $cbHost + ":" + $cbPort + "/admin/config?token=<ADMIN_TOKEN>") -ForegroundColor Cyan
+$adminToken = ""
+if ($envMap.ContainsKey("ADMIN_TOKEN")) {
+  $adminToken = ($envMap["ADMIN_TOKEN"] -as [string]).Trim()
+}
+Write-Host ("Config page: http://" + $cbHost + ":" + $cbPort + "/admin/config?token=" + $adminToken) -ForegroundColor Cyan
 Write-Host ""
 
 & $venvPy -m biaoge_bot.main

@@ -6,14 +6,17 @@
       "app_token": "${BITABLE_APP_TOKEN_KLEIN}",
       "table_id": "${BITABLE_TABLE_ID_KLEIN}",
       "view_id": "",
+      "trigger": {
+        "enabled": true,
+        "workflow": "klein_add_real_details_local",
+        "user_field": "触发人"
+      },
       "fields": {
         "status": "任务状态",
         "output": "生成结果",
         "error": "错误信息",
         "prompt_id": "任务ID",
-        "created_time": "创建时间",
-        "trigger_cmd": "触发指令",
-        "trigger_user": "触发人"
+        "created_time": "创建时间"
       },
       "status_values": {
         "queued": "待处理",
@@ -24,10 +27,6 @@
         "failed": "生成失败"
       }
     }
-  },
-  "automation": {
-    "trigger_cmd_field": "触发指令",
-    "trigger_user_field": "触发人"
   },
   "workflows": {
     "klein_add_real_details_local": {

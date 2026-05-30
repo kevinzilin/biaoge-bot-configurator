@@ -32,7 +32,7 @@ $pyInfo = Resolve-Python
 if (-not $pyInfo) {
   Write-Host ""
   Write-Host "Python not found." -ForegroundColor Yellow
-  Write-Host "Please install Python 3.10+ (recommended: 3.12.x Windows x64) and enable 'Add python.exe to PATH'." -ForegroundColor Yellow
+  Write-Host "Please install Python 3.10+ [recommended: 3.12.x Windows x64] and enable 'Add python.exe to PATH'." -ForegroundColor Yellow
   Write-Host "Download: https://www.python.org/downloads/windows/" -ForegroundColor Yellow
   try { Start-Process "https://www.python.org/downloads/windows/" | Out-Null } catch {}
   exit 1
@@ -43,7 +43,7 @@ $pyVer = Get-PythonVersion -Exe $pyExe
 if (-not (Test-PythonVersionOk -Version $pyVer)) {
   Write-Host ""
   Write-Host "Python version $pyVer is not supported." -ForegroundColor Yellow
-  Write-Host "Please install Python 3.10+ (recommended: 3.12.x Windows x64)." -ForegroundColor Yellow
+  Write-Host "Please install Python 3.10+ [recommended: 3.12.x Windows x64]." -ForegroundColor Yellow
   Write-Host "Download: https://www.python.org/downloads/windows/" -ForegroundColor Yellow
   try { Start-Process "https://www.python.org/downloads/windows/" | Out-Null } catch {}
   exit 1
@@ -57,13 +57,13 @@ if (-not (Test-Path ".env")) {
     Write-Host ".env created from .env.example." -ForegroundColor Green
   } else {
     New-Item -ItemType File -Path ".env" -Force | Out-Null
-    Write-Host ".env created (empty)." -ForegroundColor Yellow
+    Write-Host ".env created [empty]." -ForegroundColor Yellow
   }
 }
 
 $venvPy = Join-Path $root ".venv\Scripts\python.exe"
 if (-not (Test-Path $venvPy)) {
-  Write-Host "Creating virtual env (.venv) ..." -ForegroundColor Cyan
+  Write-Host "Creating virtual env [.venv] ..." -ForegroundColor Cyan
   & $pyExe -m venv ".venv"
 }
 
@@ -72,4 +72,4 @@ Write-Host "Installing dependencies ..." -ForegroundColor Cyan
 & $venvPy -m pip install -r "requirements.txt"
 
 Write-Host ""
-Write-Host "Done. Next: run start.cmd to launch." -ForegroundColor Green
+Write-Host "Done. Next: run .\win_start.ps1 to launch." -ForegroundColor Green

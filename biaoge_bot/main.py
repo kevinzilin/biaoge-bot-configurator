@@ -34,7 +34,6 @@ from .modules.bitable_trigger import (
     extract_record_ids as _enc_extract_record_ids,
     extract_table_ref as _enc_extract_table_ref,
     resolve_table_key as _enc_resolve_table_key,
-    try_trigger_record as _enc_try_trigger_record,
 )
 from .ports import BitableConfig, BitableMode
 from .queue_runner import QueueRunner
@@ -331,7 +330,6 @@ def _default_bitable_fields() -> dict[str, str]:
         "error": "错误信息",
         "prompt_id": "prompt_id",
         "created_time": "创建时间",
-        "trigger_cmd": "触发指令",
     }
 
 
@@ -932,34 +930,6 @@ def do_bitable_record_changed_event_factory(ctx: AppContext):
                     return v2
         return None
 
-    def _pick_trigger_field_name(table_cfg: Any) -> str | None:
-        fields_cfg = dict(getattr(table_cfg, "fields", {}) or {})
-        for k in ("trigger_cmd", "trigger", "cmd", "command"):
-            v = fields_cfg.get(k)
-            if isinstance(v, str) and v.strip():
-                return v.strip()
-        auto = ctx.config.get("automation") if isinstance(ctx.config, dict) else None
-        if isinstance(auto, dict):
-            for k in ("trigger_cmd_field", "triggerCmdField", "trigger_field", "triggerField", "cmd_field", "cmdField"):
-                v = auto.get(k)
-                if isinstance(v, str) and v.strip():
-                    return v.strip()
-        return None
-
-    def _pick_trigger_user_field_name(table_cfg: Any) -> str | None:
-        fields_cfg = dict(getattr(table_cfg, "fields", {}) or {})
-        for k in ("trigger_user", "triggerUser", "operator", "operator_open_id"):
-            v = fields_cfg.get(k)
-            if isinstance(v, str) and v.strip():
-                return v.strip()
-        auto = ctx.config.get("automation") if isinstance(ctx.config, dict) else None
-        if isinstance(auto, dict):
-            for k in ("trigger_user_field", "triggerUserField", "operator_field", "operatorField"):
-                v = auto.get(k)
-                if isinstance(v, str) and v.strip():
-                    return v.strip()
-        return None
-
     async def _find_field_meta_by_name(bitable: Any, field_name: str | None) -> dict[str, Any] | None:
         fn = str(field_name or "").strip()
         if not fn or not hasattr(bitable, "list_fields"):
@@ -1084,16 +1054,6 @@ def do_bitable_record_changed_event_factory(ctx: AppContext):
                 return _normalize_field_texts_for_meta(item.get("field_value") or item.get("fieldValue"), status_field_meta)
         return []
 
-    def _should_trigger_cmd_text(cmd_text: str) -> bool:
-        s = str(cmd_text or "").strip()
-        if not s:
-            return False
-        if s.startswith("/"):
-            return True
-        if s.startswith("::/") or s.startswith("：：/") or s.startswith("::／") or s.startswith("：：／"):
-            return True
-        return False
-
     def _should_mark_record_running(cmd_name: str) -> bool:
         name0 = str(cmd_name or "").strip().lower()
         return name0 in ("run", "wf", "run_default")
@@ -1106,8 +1066,43 @@ def do_bitable_record_changed_event_factory(ctx: AppContext):
         # 其余命令按“工具/查询类”处理，执行完就把状态改回触发前的值。
         return True
 
-    def _build_default_trigger_command(record_id: str) -> Any:
-        return parse_message_text(f"/run record={str(record_id or '').strip()}")
+    def _pick_table_trigger_cfg(table_key: str) -> tuple[bool, str | None, str | None]:
+        if not isinstance(ctx.config, dict):
+            return False, None, None
+        tables_cfg = ctx.config.get("tables")
+        if not isinstance(tables_cfg, dict):
+            return False, None, None
+        raw_table_cfg = tables_cfg.get(table_key)
+        if not isinstance(raw_table_cfg, dict):
+            return False, None, None
+        raw_trigger = raw_table_cfg.get("trigger")
+        enabled = False
+        workflow = None
+        user_field = None
+        if isinstance(raw_trigger, dict):
+            enabled = bool(raw_trigger.get("enabled"))
+            wf0 = raw_trigger.get("workflow")
+            if isinstance(wf0, str) and wf0.strip():
+                workflow = wf0.strip()
+            uf0 = raw_trigger.get("user_field") if "user_field" in raw_trigger else raw_trigger.get("userField")
+            if isinstance(uf0, str) and uf0.strip():
+                user_field = uf0.strip()
+        if not enabled:
+            for k in ("trigger_enabled", "triggerEnabled", "enable_trigger", "enableTrigger"):
+                v = raw_table_cfg.get(k)
+                if isinstance(v, bool):
+                    enabled = v
+                elif isinstance(v, (int, float)):
+                    enabled = v != 0
+                elif isinstance(v, str) and v.strip().lower() in ("1", "true", "yes", "y", "on"):
+                    enabled = True
+        if not workflow:
+            for k in ("trigger_workflow", "triggerWorkflow", "default_workflow", "defaultWorkflow"):
+                v2 = raw_table_cfg.get(k)
+                if isinstance(v2, str) and v2.strip():
+                    workflow = v2.strip()
+                    break
+        return enabled, workflow, user_field
 
     async def _try_trigger_record(*, table_key: str, record_id: str, operator_open_id: str | None, payload: dict[str, Any]) -> None:
         bitable = (ctx.bitables or {}).get(table_key)
@@ -1126,79 +1121,80 @@ def do_bitable_record_changed_event_factory(ctx: AppContext):
         status_field_meta = await _find_field_meta_by_name(bitable, status_field) if status_field else None
         trigger_value = _normalize_status_value(status_values_cfg.get("trigger") or "触发执行", status_field_meta) or "触发执行"
         queued_value = _normalize_status_value(status_values_cfg.get("queued"), status_field_meta)
-        if status_field and trigger_value:
-            st_val = fields.get(status_field)
-            st_texts = _normalize_field_texts_for_meta(st_val, status_field_meta)
-            if trigger_value not in st_texts:
-                try:
-                    logging.info(
-                        "bitable_trigger skipped: status not trigger (table_key=%s record_id=%s status_field=%s trigger=%s got=%s)",
-                        str(table_key),
-                        str(record_id),
-                        str(status_field),
-                        str(trigger_value),
-                        json.dumps(st_texts, ensure_ascii=False),
-                    )
-                except Exception:
-                    pass
-                return
+        st_val = fields.get(status_field) if status_field else None
+        st_texts = _normalize_field_texts_for_meta(st_val, status_field_meta) if status_field else []
 
-        trig_field = _pick_trigger_field_name(table_cfg)
-        if not trig_field:
-            try:
-                logging.info("bitable_trigger skipped: missing trigger field config (table_key=%s record_id=%s)", str(table_key), str(record_id))
-            except Exception:
-                pass
-            return
-        raw_cmd_val = fields.get(trig_field)
-        cmd_texts = _field_texts(raw_cmd_val)
-        cmd_text = cmd_texts[0] if cmd_texts else ""
-        cmd = None
-        if _should_trigger_cmd_text(cmd_text):
-            cmd = parse_message_text(cmd_text)
-            if not cmd:
-                try:
-                    logging.info(
-                        "bitable_trigger skipped: cmd parse failed (table_key=%s record_id=%s cmd=%s)",
-                        str(table_key),
-                        str(record_id),
-                        str(cmd_text or ""),
-                    )
-                except Exception:
-                    pass
-                return
-        else:
-            cmd = _build_default_trigger_command(record_id)
-            cmd_text = f"/run record={str(record_id or '').strip()}"
-            if not cmd:
-                try:
-                    keys_preview = ",".join(list(fields.keys())[:30]) if isinstance(fields, dict) else ""
-                    logging.info(
-                        "bitable_trigger skipped: cmd empty and default cmd build failed (table_key=%s record_id=%s cmd_field=%s field_keys=%s)",
-                        str(table_key),
-                        str(record_id),
-                        str(trig_field),
-                        keys_preview,
-                    )
-                except Exception:
-                    pass
-                return
+        enabled, wf_from_config, trigger_user_field = _pick_table_trigger_cfg(table_key)
+        if not enabled:
             try:
                 logging.info(
-                    "bitable_trigger defaulted: cmd empty/invalid, fallback to %s (table_key=%s record_id=%s cmd_field=%s)",
-                    str(cmd_text),
+                    "bitable_trigger skipped: trigger disabled in config (table_key=%s record_id=%s)",
                     str(table_key),
                     str(record_id),
-                    str(trig_field),
                 )
             except Exception:
                 pass
+            return
+
+        if status_field and trigger_value and (trigger_value not in st_texts):
+            try:
+                logging.info(
+                    "bitable_trigger skipped: status not trigger (table_key=%s record_id=%s status_field=%s trigger=%s got=%s)",
+                    str(table_key),
+                    str(record_id),
+                    str(status_field),
+                    str(trigger_value),
+                    json.dumps(st_texts, ensure_ascii=False),
+                )
+            except Exception:
+                pass
+            return
+
+        if not status_field:
+            try:
+                logging.info(
+                    "bitable_trigger skipped: missing status field config (table_key=%s record_id=%s)",
+                    str(table_key),
+                    str(record_id),
+                )
+            except Exception:
+                pass
+            return
+
+        from .dispatcher import _pick_default_workflow_key
+
+        workflow_key = wf_from_config or _pick_default_workflow_key(ctx, table_key=table_key)
+        workflow_key = str(workflow_key or "").strip() or None
+        if not workflow_key:
+            try:
+                logging.info(
+                    "bitable_trigger skipped: missing workflow (table_key=%s record_id=%s)",
+                    str(table_key),
+                    str(record_id),
+                )
+            except Exception:
+                pass
+            return
+        if not (getattr(ctx, "workflows", None) and ctx.workflows.get(workflow_key)):
+            try:
+                logging.info(
+                    "bitable_trigger skipped: workflow not found (table_key=%s record_id=%s workflow=%s)",
+                    str(table_key),
+                    str(record_id),
+                    str(workflow_key or ""),
+                )
+            except Exception:
+                pass
+            return
+
+        cmd_name = "run"
+        args = {"workflow": workflow_key, "table": table_key, "record": record_id}
+        cmd_text = f"/run workflow={workflow_key} table={table_key} record={record_id}"
 
         op_open_id = str(operator_open_id or "").strip() or None
         if not op_open_id:
-            user_field = _pick_trigger_user_field_name(table_cfg)
-            if user_field:
-                op_open_id = _extract_open_id_from_field(fields.get(user_field))
+            if isinstance(trigger_user_field, str) and trigger_user_field.strip():
+                op_open_id = _extract_open_id_from_field(fields.get(trigger_user_field.strip()))
         if not op_open_id:
             try:
                 logging.info(
@@ -1216,15 +1212,15 @@ def do_bitable_record_changed_event_factory(ctx: AppContext):
                 str(table_key),
                 str(record_id),
                 str(cmd_text or ""),
-                str(cmd.name or ""),
-                json.dumps(cmd.args or {}, ensure_ascii=False),
+                str(cmd_name),
+                json.dumps(args or {}, ensure_ascii=False),
                 str(op_open_id or ""),
             )
         except Exception:
             pass
 
-        should_mark_running = _should_mark_record_running(cmd.name)
-        should_restore_previous = _should_restore_previous_status(cmd.name)
+        should_mark_running = _should_mark_record_running(cmd_name)
+        should_restore_previous = _should_restore_previous_status(cmd_name)
         restore_status_value: str | None = None
         if should_restore_previous and status_field:
             previous_status_texts = _extract_previous_status_texts(payload, record_id=record_id, status_field_meta=status_field_meta)
@@ -1246,18 +1242,16 @@ def do_bitable_record_changed_event_factory(ctx: AppContext):
             running_value = _normalize_status_value(status_values_cfg.get("running"), status_field_meta)
             if status_field and queued_value and running_value:
                 try:
-                    await bitable.update_record(record_id, {status_field: running_value})
+                    allow = (queued_value in st_texts) or (trigger_value in st_texts) or (not st_texts)
+                    if allow:
+                        await bitable.update_record(record_id, {status_field: running_value})
                 except Exception:
                     pass
 
-        args = dict(cmd.args or {})
-        if not any(k in args for k in ("record", "record_id", "recordId", "row", "row_no", "rowNo", "line")):
-            args["record_id"] = record_id
-        if not any(k in args for k in ("table", "tableKey", "table_key")):
-            args["table"] = table_key
+        args = dict(args or {})
         trig = TriggerContext(chat_id=None, user_open_id=op_open_id, source="bitable.trigger")
         try:
-            await dispatch(ctx, name=cmd.name, args=args, trigger=trig)
+            await dispatch(ctx, name=cmd_name, args=args, trigger=trig)
             if should_restore_previous and getattr(bitable, "mode", None) and getattr(bitable.mode, "write_enabled", False):
                 if status_field and restore_status_value:
                     try:
@@ -1337,7 +1331,7 @@ def do_bitable_record_changed_event_factory(ctx: AppContext):
             async def _job() -> None:
                 for rid in (record_ids or [])[:20]:
                     try:
-                        await _enc_try_trigger_record(ctx, table_key=table_key, record_id=rid, operator_open_id=operator_open_id, payload=payload)
+                        await _try_trigger_record(table_key=table_key, record_id=rid, operator_open_id=operator_open_id, payload=payload)
                     except Exception:
                         continue
 
@@ -1364,8 +1358,12 @@ def main() -> None:
             print("1) 打开项目根目录下的 .env 文件")
             print("2) 填上飞书应用的 FEISHU_APP_ID 和 FEISHU_APP_SECRET（以及你的表格配置相关参数）")
             print("3) 保存后重新运行 start.cmd")
-            raise SystemExit(1)
-        raise
+        else:
+            print("")
+            print(f"启动失败：{msg}")
+            print("")
+            print("请检查 .env 中的配置是否正确，或运行 start.cmd 重新交互式配置。")
+        raise SystemExit(1)
     logging.basicConfig(level=getattr(logging, ctx.settings.bot_log_level.upper(), logging.INFO))
     try:
         ctx.runner.set_context(ctx)

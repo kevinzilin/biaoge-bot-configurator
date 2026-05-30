@@ -1,6 +1,7 @@
 import os
 import sys
 import re
+import secrets
 import subprocess
 import socket
 
@@ -233,43 +234,133 @@ def ensure_venv_module(venv_py, module_name, pip_package_name):
 def fix_workflow_config_path(root_dir, env_map):
     raw = str(env_map.get("WORKFLOW_CONFIG_PATH", "") or "").strip()
     wf = raw.strip('"')
-    default_path = os.path.join(root_dir, "config", "workflows.local.json")
+    config_dir = os.path.join(root_dir, "config")
+    env_path = os.path.join(root_dir, ".env")
 
-    if not wf:
-        if os.path.exists(default_path):
-            picked = os.path.abspath(default_path)
-            update_dotenv(os.path.join(root_dir, ".env"), {"WORKFLOW_CONFIG_PATH": picked})
-            env_map["WORKFLOW_CONFIG_PATH"] = picked
-            print(f"WORKFLOW_CONFIG_PATH set -> {picked}")
+    # 相对路径 → 基于项目根目录解析为绝对路径
+    if wf and not os.path.isabs(wf):
+        wf = os.path.join(root_dir, wf)
+
+    # 路径正确存在 → 确保写入绝对路径到 .env
+    if wf and os.path.exists(wf):
+        abs_path = os.path.abspath(wf)
+        if abs_path != raw:
+            update_dotenv(env_path, {"WORKFLOW_CONFIG_PATH": abs_path})
+            env_map["WORKFLOW_CONFIG_PATH"] = abs_path
+            print(f"WORKFLOW_CONFIG_PATH -> {abs_path}")
         return
-    if wf and not os.path.exists(wf):
-        leaf = os.path.basename(wf) if wf else ""
-        cands = []
-        config_dir = os.path.join(root_dir, "config")
-        if wf and not os.path.isabs(wf):
-            cands.append(os.path.join(root_dir, wf))
-        else:
-            cands.append(wf)
+
+    # 路径不存在 → 在项目 config 目录下查找替代文件
+    cands = []
+    if wf:
+        leaf = os.path.basename(wf)
         if leaf:
             cands.append(os.path.join(config_dir, leaf))
-        cands.append(os.path.join(config_dir, "workflows.local.json"))
-        cands.append(os.path.join(config_dir, "workflows.example.json"))
-        
-        picked = ""
-        for c in cands:
-            c_clean = c.strip().strip('"')
-            if c_clean and os.path.exists(c_clean):
-                picked = os.path.abspath(c_clean)
-                break
-        
-        if picked:
-            update_dotenv(os.path.join(root_dir, ".env"), {"WORKFLOW_CONFIG_PATH": picked})
-            env_map["WORKFLOW_CONFIG_PATH"] = picked
-            print(f"WORKFLOW_CONFIG_PATH fixed -> {picked}")
-        else:
-            update_dotenv(os.path.join(root_dir, ".env"), {"WORKFLOW_CONFIG_PATH": ""})
-            env_map["WORKFLOW_CONFIG_PATH"] = ""
-            print("WORKFLOW_CONFIG_PATH not found, cleared to allow startup.")
+    cands.append(os.path.join(config_dir, "workflows.local.json"))
+    cands.append(os.path.join(config_dir, "workflows.example.json"))
+
+    picked = ""
+    for c in cands:
+        if c and os.path.exists(c):
+            picked = os.path.abspath(c)
+            break
+
+    if picked:
+        update_dotenv(env_path, {"WORKFLOW_CONFIG_PATH": picked})
+        env_map["WORKFLOW_CONFIG_PATH"] = picked
+        print(f"WORKFLOW_CONFIG_PATH fixed -> {picked}")
+    else:
+        # 清空路径，让 bot 使用默认逻辑（config/workflows.local.json）
+        update_dotenv(env_path, {"WORKFLOW_CONFIG_PATH": ""})
+        env_map["WORKFLOW_CONFIG_PATH"] = ""
+        print("WORKFLOW_CONFIG_PATH not found, cleared to allow startup.")
+
+WORKFLOWS_LOCAL_SKELETON = """\
+{
+  "_comment": "精简配置骨架。完整示例参考 config/workflows.example.json",
+  "default_table": "",
+  "default_workflow": "",
+  "tables": {},
+  "automation": {},
+  "workflows": {}
+}
+"""
+
+
+def ensure_workflows_local_config(root_dir):
+    """如果 workflows.local.json 不存在，从骨架自动创建一个精简副本"""
+    local_path = os.path.join(root_dir, "config", "workflows.local.json")
+    if not os.path.exists(local_path):
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        with open(local_path, "w", encoding="utf-8") as f:
+            f.write(WORKFLOWS_LOCAL_SKELETON.strip() + "\n")
+        print("Created config\\workflows.local.json (minimal skeleton)")
+
+
+REQUIRED_ENV_KEYS = [
+    ("FEISHU_APP_ID", "飞书应用 App ID"),
+    ("FEISHU_APP_SECRET", "飞书应用 App Secret"),
+]
+
+# 可选但推荐配置：留空则自动生成随机令牌
+OPTIONAL_ENV_KEYS = [
+    ("ADMIN_TOKEN", "管理后台访问令牌（留空自动生成）"),
+]
+
+
+def ensure_required_config(root_dir):
+    """预检配置，缺失时交互式提示用户输入并写入 .env"""
+    env_path = os.path.join(root_dir, ".env")
+    env_map = read_dotenv(env_path)
+
+    missing = []
+    for key, desc in REQUIRED_ENV_KEYS:
+        if not env_map.get(key, "").strip():
+            missing.append((key, desc, True))
+    for key, desc in OPTIONAL_ENV_KEYS:
+        if not env_map.get(key, "").strip():
+            missing.append((key, desc, False))
+
+    if not missing:
+        return True
+
+    print("")
+    print("=" * 60)
+    print("  缺少配置，请按提示输入：")
+    print("  (Ctrl+C 可取消)")
+    print("=" * 60)
+
+    updates = {}
+    for key, desc, required in missing:
+        print(f"\n  [{desc}]")
+        try:
+            value = input(f"  {key} = ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\n\n  已取消。")
+            return False
+        if not value:
+            if required:
+                print(f"\n  ! {key} 不能为空，已取消。")
+                return False
+            value = secrets.token_urlsafe(16)
+            print(f"  -> 已自动生成: {value}")
+        updates[key] = value
+
+    # 如果 .env 不存在，从 .env.example 复制
+    if not os.path.exists(env_path):
+        example_path = os.path.join(root_dir, ".env.example")
+        if os.path.exists(example_path):
+            import shutil
+            shutil.copy2(example_path, env_path)
+
+    update_dotenv(env_path, updates)
+
+    for k, v in updates.items():
+        os.environ[k] = v
+
+    print(f"\n  已保存到 .env\n")
+    return True
+
 
 def check_port_in_use(host, port):
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -311,7 +402,12 @@ def main():
         fix_workflow_config_path(root, env_map)
     except Exception:
         pass
-        
+
+    try:
+        ensure_workflows_local_config(root)
+    except Exception:
+        pass
+
     cb_host = "127.0.0.1"
     cb_port = 9901
     if "CALLBACK_HOST" in env_map:
@@ -330,9 +426,16 @@ def main():
         print(f"\nPort already in use: {cb_host}:{cb_port}")
         print("Please close the existing process, or change CALLBACK_PORT in .env, then run start.cmd again.")
         sys.exit(1)
-        
+
+    if not ensure_required_config(root):
+        sys.exit(1)
+
+    # Re-read .env to pick up any values written by interactive config
+    env_map = read_dotenv(os.path.join(root, ".env"))
+
     print("Starting biaoge_bot ...")
-    print(f"Config page: http://{cb_host}:{cb_port}/admin/config?token=<ADMIN_TOKEN>\n")
+    admin_token = env_map.get("ADMIN_TOKEN", "").strip()
+    print(f"Config page: http://{cb_host}:{cb_port}/admin/config?token={admin_token}\n")
     
     try:
         # 正常调用虚拟环境运行机器人主程序
