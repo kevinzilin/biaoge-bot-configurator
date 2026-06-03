@@ -85,7 +85,7 @@
     "_说明": "每个 key 是 workflow_key，供 /run workflow=xxx 或 trigger.workflow 使用。",
 
     "klein_add_real_details": {
-      "_说明": "本地 ComfyUI + 单表绑定。不拆分，一次触发只跑一条记录。",
+      "_说明": "本地 ComfyUI + 单表绑定。不拆分，一次触发只跑一条记录。writeBackFields.output 支持两种格式：(1) 字符串 -> 所有产出写入同一列；(2) 对象 {image,video,audio,text} -> 按类型分流到不同列，缺失的列自动创建。",
       "workflowName": "klein添加真实细节",
       "apiWorkflowPath": "d:\\\\www\\\\biaoge\\\\klein添加真实细节.json",
       "comfyuiBaseUrl": "http://127.0.0.1:8188",
@@ -122,7 +122,7 @@
     },
 
     "test-gpt-image": {
-      "_说明": "本地 ComfyUI + 关联表拆分。relationPrompt.split=true 时，主表一条记录会按关联表行数拆成多个子任务，每个子任务注入对应行的参数值。结果回写到主记录时自动合并。",
+      "_说明": "本地 ComfyUI + 关联表拆分。relationPrompt.split=true 时，主表一条记录会按关联表行数拆成多个子任务，每个子任务注入对应行的参数值。结果回写到主记录时自动合并。如需按类型分流输出（如图片->图片列、文本->文本列），可将 writeBackFields.output 改为 {\"image\":\"图片结果\",\"text\":\"文本结果\",\"video\":\"视频结果\",\"audio\":\"音频结果\"}。如需只采集特定节点的文本输出（非所有节点的 text bucket），可加 \"textNodeIds\":[\"39\"] 仅过滤文本、或 \"outputNodeIds\":{\"text\":[\"39\"],\"images\":[\"145\"]} 按类型分别过滤。不配置则采集所有节点。",
       "workflowName": "test-gpt-image",
       "comfyuiBaseUrl": "http://127.0.0.1:8188",
       "table": "gpt_test_table",

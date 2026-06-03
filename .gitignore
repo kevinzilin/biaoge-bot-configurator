@@ -9,6 +9,7 @@ __pycache__/
 *.bak
 .pytest_cache/
 tmp/
+temp_downloads/
 downloads/
 config/workflows.local.json
 config/workflows.*.local.json

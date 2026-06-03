@@ -1,0 +1,23 @@
+{
+  "应用身份": {
+    "scopes": [
+      "im:message",
+      "im:message:send_as_bot",
+      "drive:drive",
+      "bitable:app"
+    ]
+  },
+  "用户身份": {
+    "scopes": [
+      "drive:drive",
+      "bitable:app"
+    ]
+  },
+  "事件订阅": {
+    "protocol": "socket_mode",
+    "events": [
+      "drive.file.bitable_record_changed_v1",
+      "im.message.receive_v1"
+    ]
+  }
+}

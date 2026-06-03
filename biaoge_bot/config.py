@@ -52,6 +52,7 @@ class Settings:
     remote_result_mode: str
     remote_poll_interval_seconds: int
     remote_poll_fallback_seconds: int
+    pending_timeout_seconds: int
     callback_host: str
     callback_port: int
     callback_path: str
@@ -104,6 +105,7 @@ def load_settings(env_path: str | None = None) -> Settings:
         remote_result_mode=os.environ.get("REMOTE_RESULT_MODE", "poll").strip().lower() or "poll",
         remote_poll_interval_seconds=max(10, to_int(os.environ.get("REMOTE_POLL_INTERVAL_SECONDS", "60"), 60)),
         remote_poll_fallback_seconds=max(0, to_int(os.environ.get("REMOTE_POLL_FALLBACK_SECONDS", "600"), 600)),
+        pending_timeout_seconds=max(0, to_int(os.environ.get("PENDING_TIMEOUT_SECONDS", "7200"), 7200)),
         callback_host=os.environ.get("CALLBACK_HOST", "127.0.0.1").strip(),
         callback_port=int(os.environ.get("CALLBACK_PORT", "9901").strip()),
         callback_path=os.environ.get("CALLBACK_PATH", "/comfyui/callback").strip(),

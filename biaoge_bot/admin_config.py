@@ -594,7 +594,7 @@ _PAGE_HTML = r"""
 
     function addRow(k, v) {
       const key = el("input", {type:"text", value: (k||""), placeholder: keyPlaceholder || ""});
-      const val = el("input", {type:"text", value: (v==null ? "" : String(v)), placeholder: valuePlaceholder || ""});
+      const val = el("input", {type:"text", value: (v==null ? "" : (typeof v === "object" ? JSON.stringify(v) : String(v))), placeholder: valuePlaceholder || ""});
       if (keyListId) key.setAttribute("list", keyListId);
       if (valueListId) val.setAttribute("list", valueListId);
       const del = el("button", {type:"button", text:"删除", class:"btnGhost"});
@@ -650,7 +650,7 @@ _PAGE_HTML = r"""
     table.appendChild(tbody);
 
     function addRow(v) {
-      const val = el("input", {type:"text", value: (v==null ? "" : String(v)), placeholder: valuePlaceholder || ""});
+      const val = el("input", {type:"text", value: (v==null ? "" : (typeof v === "object" ? JSON.stringify(v) : String(v))), placeholder: valuePlaceholder || ""});
       const del = el("button", {type:"button", text:"删除", class:"btnGhost"});
       const tr = el("tr", null, [
         el("td", null, [val]),
@@ -1287,6 +1287,12 @@ _PAGE_HTML = r"""
       const defaults = kvEditor(orig.defaults || {}, "key", "value");
       const recordFields = kvEditor(orig.recordFields || orig.record_fields || {}, "参数名(如 prompt)", "列名(如 提示词)");
       const writeBackFields = kvEditor(orig.writeBackFields || orig.write_back_fields || {}, "字段key(如 output)", "列名(如 生成结果)");
+      const oniOrig = orig.outputNodeIds || orig.output_node_ids || {};
+      const outputNodeIds = kvEditor(
+        Object.fromEntries(Object.entries(oniOrig).map(([k,v]) => [k, Array.isArray(v) ? v.join(",") : String(v)])),
+        "类型(images/text/videos/gifs/files)",
+        "节点ID(逗号分隔, 如 39,52)"
+      );
       const params = paramsEditor(orig.params || {});
       const strictParamValidation = el("input", {type:"checkbox", class:"switch"});
       strictParamValidation.checked = false;
@@ -1357,6 +1363,8 @@ _PAGE_HTML = r"""
         if (rf && typeof rf === "object" && Object.keys(rf).length) out.recordFields = deepCopy(rf);
         const wb = wf0.writeBackFields || wf0.write_back_fields || {};
         if (wb && typeof wb === "object" && Object.keys(wb).length) out.writeBackFields = deepCopy(wb);
+        const oni = wf0.outputNodeIds || wf0.output_node_ids || null;
+        if (oni && typeof oni === "object" && Object.keys(oni).length) out.outputNodeIds = deepCopy(oni);
         const rp = wf0.relationPrompt || wf0.relation_prompt || null;
         if (rp && typeof rp === "object" && Object.keys(rp).length) out.relationPrompt = deepCopy(rp);
         const hasAny = Object.keys(out).length > 0;
@@ -1449,6 +1457,8 @@ _PAGE_HTML = r"""
         if (rf && typeof rf === "object" && Object.keys(rf).length) backup.recordFields = rf;
         const wf = writeBackFields && writeBackFields._getValue ? writeBackFields._getValue() : {};
         if (wf && typeof wf === "object" && Object.keys(wf).length) backup.writeBackFields = wf;
+        const oniRaw = outputNodeIds && outputNodeIds._getValue ? outputNodeIds._getValue() : {};
+        if (oniRaw && typeof oniRaw === "object" && Object.keys(oniRaw).length) backup.outputNodeIds = oniRaw;
         const rpPack = _buildRelationPromptBackup();
         if (rpPack && rpPack.spec) {
           backup.relationPrompt = rpPack.spec;
@@ -1469,7 +1479,20 @@ _PAGE_HTML = r"""
         if (b.table != null && !hasText(tableKey.value)) tableKey.value = String(b.table);
         if (b.runLogTable != null && !hasText(runLogTableKey.value)) runLogTableKey.value = String(b.runLogTable);
         if (b.recordFields && recordFields && recordFields._setValue) recordFields._setValue(b.recordFields);
-        if (b.writeBackFields && writeBackFields && writeBackFields._setValue) writeBackFields._setValue(b.writeBackFields);
+        if (b.writeBackFields && writeBackFields && writeBackFields._setValue) {
+          const wb = deepCopy(b.writeBackFields);
+          if (wb.output && typeof wb.output === "object" && !Array.isArray(wb.output)) {
+            wb.output = JSON.stringify(wb.output);
+          }
+          writeBackFields._setValue(wb);
+        }
+        if (b.outputNodeIds && outputNodeIds && outputNodeIds._setValue) {
+          const oni = {};
+          for (const [k, v] of Object.entries(b.outputNodeIds || {})) {
+            oni[k] = Array.isArray(v) ? v.join(",") : String(v);
+          }
+          outputNodeIds._setValue(oni);
+        }
         const rp = b.relationPrompt && typeof b.relationPrompt === "object" ? b.relationPrompt : null;
         if (rp) {
           if (b.relationPromptEnabled != null) relationEnabled.checked = !!b.relationPromptEnabled;
@@ -1609,7 +1632,20 @@ _PAGE_HTML = r"""
           ]),
           el("div", {class:"form"}, [
             writeBackFields,
-            el("div", {class:"help", text:"例：output -> 结果图；prompt_id -> 任务ID；status -> 任务状态。"}),
+            el("div", {class:"help", text:"例：output -> 结果图（或 output -> {\"image\":\"图片结果\",\"text\":\"文本结果\"} 按类型分流；image/video/audio/text 可选）。prompt_id -> 任务ID；status -> 任务状态。"}),
+          ]),
+        ]),
+        el("div", {class:"block bitableOnly workflowTableOnly"}, [
+          el("div", {class:"blockTitle"}, [
+            el("div", {class:"blockTitleLeft"}, [
+              el("span", {class:"pill", text:"过滤"}),
+              el("div", {class:"blockTitleText", text:"outputNodeIds"}),
+              el("div", {class:"blockTitleSub", text:"只采集指定节点的输出（可选，不填=全采）"}),
+            ]),
+          ]),
+          el("div", {class:"form"}, [
+            outputNodeIds,
+            el("div", {class:"help", text:"例：images -> \"145,52\"（只采集节点145和52的图片）；text -> \"39\"（只采集节点39的文本）。支持 images/gifs/videos/text/files 五种类型。填节点id，逗号分隔。"}),
           ]),
         ]),
         el("div", {class:"block bitableOnly workflowTableOnly"}, [
@@ -1717,6 +1753,10 @@ _PAGE_HTML = r"""
             if (rlt) out.runLogTable = rlt; else delete out.runLogTable;
             out.recordFields = recordFields._getValue();
             out.writeBackFields = writeBackFields._getValue();
+            const wbOutput = out.writeBackFields.output;
+            if (typeof wbOutput === "string" && wbOutput.trim().startsWith("{")) {
+              try { const p = JSON.parse(wbOutput.trim()); if (p && typeof p === "object" && !Array.isArray(p)) { out.writeBackFields.output = p; } } catch (_) {}
+            }
 
             if (relationEnabled.checked) {
               const rp = deepCopy(relOrig && typeof relOrig === "object" ? relOrig : {});
@@ -1763,6 +1803,7 @@ _PAGE_HTML = r"""
             delete out.runLogTable;
             delete out.recordFields;
             delete out.writeBackFields;
+            delete out.outputNodeIds;
             delete out.relationPrompt;
           }
           const purposeV = String(purpose || "").trim().toLowerCase();
@@ -1775,6 +1816,14 @@ _PAGE_HTML = r"""
             }
             try { _saveTableBindingBackupToLocalStorage(newKey, out[TABLE_BINDING_BACKUP_KEY] || null); } catch (e) {}
           }
+          const oniRaw = outputNodeIds._getValue();
+          const oni = {};
+          for (const [k, v] of Object.entries(oniRaw || {})) {
+            const ids = String(v || "").split(",").map(s => s.trim()).filter(Boolean);
+            if (ids.length) oni[k] = ids;
+          }
+          if (Object.keys(oni).length) out.outputNodeIds = oni; else delete out.outputNodeIds;
+
           out.params = params._getValue({strictEmptyName: strictParamValidation.checked});
 
           const rhId = (runninghubWorkflowId.value || "").trim();

@@ -140,6 +140,47 @@ class QueueRunner:
             sorted_pending = sorted(pending, key=lambda kv: float(kv[1].get("created_at") or 0.0) if isinstance(kv[1], dict) else 0.0)
             sorted_pending = sorted_pending[:100]
 
+            # 超时检查：超过 _pending_timeout_seconds 的任务强制标为失败
+            _PENDING_TIMEOUT = float(getattr(getattr(ctx, "settings", None), "pending_timeout_seconds", 0) or 0) or 7200
+            if _PENDING_TIMEOUT > 0:
+                now_ts = time.time()
+                timed_out: list[str] = []
+                for pid, info in sorted_pending:
+                    created_at = info.get("created_at") if isinstance(info, dict) else None
+                    try:
+                        created_at = float(created_at) if created_at is not None else 0.0
+                    except Exception:
+                        created_at = 0.0
+                    if created_at > 0 and (now_ts - created_at) > _PENDING_TIMEOUT:
+                        timed_out.append(pid)
+                for pid in timed_out:
+                    logging.warning("poller: task %s timed out after %ss, forcing failed status", pid, int(_PENDING_TIMEOUT))
+                    try:
+                        cctx = None
+                        async with self._lock:
+                            c = self._prompt_ctx.get(pid)
+                            if isinstance(c, dict):
+                                cctx = dict(c)
+                        if cctx:
+                            tk = str(cctx.get("table_key") or "").strip()
+                            rid = str(cctx.get("record_id") or "").strip()
+                            if tk and rid:
+                                bitable = ctx.bitables.get(tk) if ctx.bitables else None
+                                tcfg = ctx.bitable_configs.get(tk) if ctx.bitable_configs else None
+                                if bitable and tcfg and getattr(bitable, "mode", None) and getattr(bitable.mode, "write_enabled", False):
+                                    status_field = tcfg.fields.get("status")
+                                    failed_value = tcfg.status_values.get("failed")
+                                    if status_field and failed_value:
+                                        await bitable.update_record(rid, {status_field: failed_value})
+                                    error_field = tcfg.fields.get("error")
+                                    if error_field:
+                                        await bitable.update_record(rid, {error_field: f"任务超时（超过{int(_PENDING_TIMEOUT)}秒未完成）"})
+                    except Exception:
+                        logging.exception("poller: failed to write timeout failure status for prompt_id=%s", pid)
+                    async with self._lock:
+                        self._pending_remote.pop(pid, None)
+                        self._prompt_ctx.pop(pid, None)
+
             # 第一步：并发查询所有任务的状态，快速识别哪些已经完成
             async def _query_one(pid: str, info: dict[str, Any]) -> dict[str, Any] | None:
                 if mode != "poll" and fallback > 0:
@@ -245,6 +286,29 @@ class QueueRunner:
                         await handle_callback_payload(ctx, payload)
                     except Exception:
                         logging.exception("poller: handle_callback_payload failed for prompt_id=%s", pid)
+                        # 尽可能把表格状态改为"失败"，避免记录卡在"执行中"
+                        try:
+                            cctx = None
+                            async with self._lock:
+                                c = self._prompt_ctx.get(pid)
+                                if isinstance(c, dict):
+                                    cctx = dict(c)
+                            if cctx:
+                                tk = str(cctx.get("table_key") or "").strip()
+                                rid = str(cctx.get("record_id") or "").strip()
+                                if tk and rid:
+                                    bitable = ctx.bitables.get(tk) if ctx.bitables else None
+                                    tcfg = ctx.bitable_configs.get(tk) if ctx.bitable_configs else None
+                                    if bitable and tcfg and getattr(bitable, "mode", None) and getattr(bitable.mode, "write_enabled", False):
+                                        status_field = tcfg.fields.get("status")
+                                        failed_value = tcfg.status_values.get("failed")
+                                        if status_field and failed_value:
+                                            await bitable.update_record(rid, {status_field: failed_value})
+                                        error_field = tcfg.fields.get("error")
+                                        if error_field:
+                                            await bitable.update_record(rid, {error_field: "轮询处理回调时发生内部错误，请重新触发"})
+                        except Exception:
+                            logging.exception("poller: failed to write failure status for prompt_id=%s", pid)
                     async with self._lock:
                         self._pending_remote.pop(pid, None)
 

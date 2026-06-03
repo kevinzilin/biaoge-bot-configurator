@@ -1578,6 +1578,7 @@ async def run_workflow(
                 prompt_id = created.task_id
                 if not prompt_id:
                     logging.warning("runninghub create_task succeeded but task_id is missing: workflow=%s", workflow_key)
+                    err_msg = "RunningHub 创建任务成功但未返回 task_id，无法跟踪任务状态"
             else:
                 prompt_id = await queue_by_workflowprompt(
                     comfyui_client,
@@ -1585,6 +1586,8 @@ async def run_workflow(
                     node_info_list=node_info_list,
                     extra_data=extra_data,
                 )
+                if not prompt_id and not err_msg:
+                    err_msg = "ComfyUI 提交任务成功但未返回 prompt_id，无法跟踪任务状态"
 
             if prompt_id:
                 prompt_ids.append(prompt_id)

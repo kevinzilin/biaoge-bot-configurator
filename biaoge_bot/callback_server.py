@@ -180,14 +180,52 @@ def _extract_output_candidates(payload: dict[str, Any]) -> list[str]:
     return [c for c in candidates if isinstance(c, str) and c.strip()]
 
 
-def _iter_url_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
+def _iter_external_url_items(payload: dict[str, Any], *, output_node_ids: dict[str, set[str]] | None = None) -> list[dict[str, Any]]:
+    """Parse RunningHub results array and other external URL formats with type metadata.
+
+    Filters by nodeId per outputType when output_node_ids is configured.
+    RunningHub results have nodeId + outputType — both are used for filtering.
+    Other formats (webhook files/data) typically lack nodeId and pass through unfiltered.
+    """
+    def _should_skip(item: dict[str, Any]) -> bool:
+        if not output_node_ids:
+            return False
+        otype = _classify_output_type(item, bucket_key=None)
+        allowed = output_node_ids.get(otype)
+        if allowed is None:
+            return False
+        node_id = str(item.get("nodeId") or item.get("node_id") or "").strip()
+        if not node_id:
+            return False  # no nodeId means we can't judge — let it through
+        return node_id not in allowed
+
     items: list[dict[str, Any]] = []
+    results = payload.get("results")
+    if isinstance(results, list):
+        for it in results:
+            if isinstance(it, dict):
+                url = it.get("url")
+                if not isinstance(url, str) or not _is_http_url(url):
+                    continue
+                if _should_skip(it):
+                    continue
+                it = dict(it)
+                it["_source"] = "runninghub_results"
+                items.append(it)
+    if items:
+        return items
     for k in ("files", "data", "outputs"):
         v = payload.get(k)
         if isinstance(v, list):
             for it in v:
                 if isinstance(it, dict) and any(x in it for x in ("url", "fileUrl", "fileURL", "file_url")):
-                    items.append(it)
+                    if _should_skip(it):
+                        continue
+                    it2 = dict(it)
+                    it2["_source"] = "external"
+                    items.append(it2)
+    if items:
+        return items
     result = payload.get("result")
     if isinstance(result, dict):
         for k in ("files", "data"):
@@ -195,8 +233,34 @@ def _iter_url_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
             if isinstance(v, list):
                 for it in v:
                     if isinstance(it, dict) and any(x in it for x in ("url", "fileUrl", "fileURL", "file_url")):
-                        items.append(it)
+                        if _should_skip(it):
+                            continue
+                        it2 = dict(it)
+                        it2["_source"] = "external"
+                        items.append(it2)
     return items
+
+
+def _iter_url_items(payload: dict[str, Any], *, output_node_ids: dict[str, set[str]] | None = None) -> list[dict[str, Any]]:
+    items = _iter_external_url_items(payload, output_node_ids=output_node_ids)
+    if items:
+        return items
+    items2: list[dict[str, Any]] = []
+    for k in ("files", "data", "outputs"):
+        v = payload.get(k)
+        if isinstance(v, list):
+            for it in v:
+                if isinstance(it, dict) and any(x in it for x in ("url", "fileUrl", "fileURL", "file_url")):
+                    items2.append(it)
+    result = payload.get("result")
+    if isinstance(result, dict):
+        for k in ("files", "data"):
+            v = result.get(k)
+            if isinstance(v, list):
+                for it in v:
+                    if isinstance(it, dict) and any(x in it for x in ("url", "fileUrl", "fileURL", "file_url")):
+                        items2.append(it)
+    return items2
 
 def _strip_ticks(s: str) -> str:
     s = (s or "").strip()
@@ -212,7 +276,84 @@ def _safe_filename(name: str) -> str:
     return re.sub(r"[\\/:*?\"<>|\r\n]+", "_", name)
 
 
-def _iter_output_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
+def _classify_extension(label: str) -> str:
+    label = str(label or "").strip().lower().lstrip(".")
+    if label in ("png", "jpg", "jpeg", "webp", "gif", "bmp", "image", "images"):
+        return "image"
+    if label in ("mp4", "webm", "avi", "mov", "video", "videos"):
+        return "video"
+    if label in ("mp3", "wav", "ogg", "flac", "aac", "m4a", "audio", "audios"):
+        return "audio"
+    if label in ("txt", "json", "csv", "md", "log", "xml", "yaml", "yml", "text", "texts", "string"):
+        return "text"
+    return "image"
+
+
+def _classify_output_type(item: dict[str, Any], bucket_key: str | None = None) -> str:
+    if bucket_key == "images":
+        return "image"
+    if bucket_key in ("gifs", "videos"):
+        return "video"
+    if bucket_key == "text":
+        return "text"
+    output_type = item.get("outputType") or item.get("output_type")
+    if isinstance(output_type, str) and output_type.strip():
+        return _classify_extension(output_type.strip())
+    file_type = item.get("fileType") or item.get("file_type")
+    if isinstance(file_type, str) and file_type.strip():
+        return _classify_extension(file_type.strip())
+    name = item.get("filename") or item.get("name") or item.get("fileUrl") or item.get("file_url") or item.get("url") or ""
+    ext = Path(str(name)).suffix.lower().lstrip(".")
+    if ext:
+        return _classify_extension(ext)
+    return "image"
+
+
+_OUTPUT_BUCKET_KEYS = ("images", "gifs", "videos", "text", "files")
+
+
+def _resolve_output_node_ids(workflow_cfg: dict[str, Any] | None) -> dict[str, set[str]] | None:
+    """Extract per-type node ID filter from workflow config.
+
+    Config styles (combined if both present):
+      "textNodeIds": ["39", "42"]           — shorthand, maps to {"text": {"39","42"}}
+      "outputNodeIds": {"text":["39"], "images":["145"]}  — per-type filter
+
+    Returns None meaning "collect all outputs from all nodes" (backwards-compatible).
+    Empty dict means "no filter for any type" — same as None.
+    """
+    if not isinstance(workflow_cfg, dict):
+        return None
+    result: dict[str, set[str]] = {}
+
+    ids = workflow_cfg.get("textNodeIds")
+    if isinstance(ids, list):
+        s = {str(x).strip() for x in ids if str(x).strip()}
+        if s:
+            result["text"] = s
+
+    oni = workflow_cfg.get("outputNodeIds")
+    if isinstance(oni, dict):
+        for otype in _OUTPUT_BUCKET_KEYS:
+            ids2 = oni.get(otype)
+            if isinstance(ids2, list):
+                s2 = {str(x).strip() for x in ids2 if str(x).strip()}
+                if s2:
+                    existing = result.get(otype)
+                    if existing:
+                        existing.update(s2)
+                    else:
+                        result[otype] = s2
+
+    return result if result else None
+
+
+def _is_content_url(s: str) -> bool:
+    s = s.strip()
+    return s.startswith("http://") or s.startswith("https://")
+
+
+def _iter_output_items(payload: dict[str, Any], *, output_node_ids: dict[str, set[str]] | None = None) -> list[dict[str, Any]]:
     result = payload.get("result")
     if not isinstance(result, dict):
         return []
@@ -220,16 +361,33 @@ def _iter_output_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(outputs, dict):
         return []
     items: list[dict[str, Any]] = []
-    for _, node_out in outputs.items():
+    for node_id, node_out in outputs.items():
         if not isinstance(node_out, dict):
             continue
-        for key in ("images", "gifs", "videos", "files"):
-            arr = node_out.get(key)
+        node_id_s = str(node_id)
+        for bucket_key in _OUTPUT_BUCKET_KEYS:
+            arr = node_out.get(bucket_key)
             if not isinstance(arr, list):
+                continue
+            # Check per-type node filter
+            allowed_nodes = output_node_ids.get(bucket_key) if output_node_ids else None
+            if allowed_nodes is not None and node_id_s not in allowed_nodes:
                 continue
             for it in arr:
                 if isinstance(it, dict):
+                    it = dict(it)
+                    it["_bucket"] = bucket_key
+                    it["_node_id"] = node_id_s
                     items.append(it)
+                elif isinstance(it, str) and it.strip():
+                    s = it.strip()
+                    if bucket_key == "text":
+                        if _is_content_url(s):
+                            items.append({"url": s, "_bucket": bucket_key, "_node_id": node_id_s})
+                        else:
+                            items.append({"content": s, "_bucket": bucket_key, "_node_id": node_id_s})
+                    else:
+                        items.append({"filename": s, "_bucket": bucket_key, "_node_id": node_id_s})
     return items
 
 
@@ -241,9 +399,9 @@ def _build_view_url(*, base_url: str, filename: str, subfolder: str, type_: str)
     return f"{base}/view?{urlencode(q)}"
 
 
-def _collect_result_urls(payload: dict[str, Any], *, base_url: str) -> list[str]:
+def _collect_result_urls(payload: dict[str, Any], *, base_url: str, output_node_ids: dict[str, set[str]] | None = None) -> list[str]:
     urls: list[str] = []
-    for it in _iter_output_items(payload):
+    for it in _iter_output_items(payload, output_node_ids=output_node_ids):
         u = it.get("fileUrl") or it.get("fileURL") or it.get("file_url") or it.get("url")
         if isinstance(u, str) and _is_http_url(u):
             urls.append(u.strip())
@@ -253,7 +411,7 @@ def _collect_result_urls(payload: dict[str, Any], *, base_url: str) -> list[str]
             subfolder = it.get("subfolder") if isinstance(it.get("subfolder"), str) else ""
             type_ = it.get("type") if isinstance(it.get("type"), str) else "output"
             urls.append(_build_view_url(base_url=base_url, filename=filename.strip(), subfolder=subfolder, type_=type_))
-    for it in _iter_url_items(payload):
+    for it in _iter_url_items(payload, output_node_ids=output_node_ids):
         u = it.get("fileUrl") or it.get("fileURL") or it.get("file_url") or it.get("url")
         if isinstance(u, str) and _is_http_url(u):
             urls.append(u.strip())
@@ -266,6 +424,36 @@ def _collect_result_urls(payload: dict[str, Any], *, base_url: str) -> list[str]
         seen.add(s)
         out.append(s)
     return out
+
+
+def _collect_typed_result_urls(payload: dict[str, Any], *, base_url: str, output_node_ids: dict[str, set[str]] | None = None) -> dict[str, list[str]]:
+    typed: dict[str, list[str]] = {"image": [], "video": [], "audio": [], "text": []}
+    seen: set[str] = set()
+    for it in _iter_output_items(payload, output_node_ids=output_node_ids):
+        bucket = it.get("_bucket")
+        otype = _classify_output_type(it, bucket_key=bucket if isinstance(bucket, str) else None)
+        u = it.get("fileUrl") or it.get("fileURL") or it.get("file_url") or it.get("url")
+        url: str | None = None
+        if isinstance(u, str) and _is_http_url(u):
+            url = u.strip()
+        else:
+            filename = it.get("filename")
+            if isinstance(filename, str) and filename.strip() and _strip_ticks(base_url).strip():
+                subfolder = it.get("subfolder") if isinstance(it.get("subfolder"), str) else ""
+                type_ = it.get("type") if isinstance(it.get("type"), str) else "output"
+                url = _build_view_url(base_url=base_url, filename=filename.strip(), subfolder=subfolder, type_=type_)
+        if url and url not in seen:
+            seen.add(url)
+            typed[otype].append(url)
+    for it in _iter_external_url_items(payload, output_node_ids=output_node_ids):
+        otype = _classify_output_type(it, bucket_key=None)
+        u = it.get("fileUrl") or it.get("fileURL") or it.get("file_url") or it.get("url")
+        if isinstance(u, str) and _is_http_url(u):
+            url = u.strip()
+            if url not in seen:
+                seen.add(url)
+                typed[otype].append(url)
+    return typed
 
 
 async def _download_from_view(ctx: AppContext, *, base_url: str, filename: str, subfolder: str, type_: str, prompt_id: str | None) -> str | None:
@@ -537,6 +725,7 @@ async def _write_back_record(
     prompt_id: str | None,
     error: str | None,
     cb_ctx: dict[str, Any] | None,
+    typed_outputs: dict[str, dict[str, list]] | None = None,
 ) -> None:
     lock = await _acquire_main_writeback_lock(table_cfg, record_id)
     async with lock:
@@ -551,6 +740,7 @@ async def _write_back_record(
             prompt_id=prompt_id,
             error=error,
             cb_ctx=cb_ctx,
+            typed_outputs=typed_outputs,
         )
 
 
@@ -1439,7 +1629,9 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
 
     view_base2 = cb_ctx.get("comfyui_base_url")
     view_base2 = view_base2 if isinstance(view_base2, str) else ""
-    result_urls = _collect_result_urls(payload, base_url=view_base2)
+    output_node_ids = _resolve_output_node_ids(workflow_cfg)
+    result_urls = _collect_result_urls(payload, base_url=view_base2, output_node_ids=output_node_ids)
+    typed_result_urls = _collect_typed_result_urls(payload, base_url=view_base2, output_node_ids=output_node_ids)
 
     status = payload.get("status")
     status = str(status).strip().lower() if isinstance(status, str) else ""
@@ -1476,7 +1668,7 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
 
     provider = payload.get("provider")
     provider = str(provider).strip().lower() if isinstance(provider, str) else ""
-    if provider not in ("runninghub",) and prompt_id and (not isinstance(payload.get("result"), dict) or not _iter_output_items(payload)):
+    if provider not in ("runninghub",) and prompt_id and (not isinstance(payload.get("result"), dict) or not _iter_output_items(payload, output_node_ids=output_node_ids)):
         base = _strip_ticks(str(cb_ctx.get("comfyui_base_url") or "")).strip() or ctx.settings.comfyui_base_url
         cli = ctx.comfyui if base.rstrip("/") == ctx.settings.comfyui_base_url.rstrip("/") else ComfyUIClient(base)
         try:
@@ -1486,20 +1678,32 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
         if isinstance(item, dict):
             payload["result"] = item
             if not result_urls:
-                result_urls = _collect_result_urls(payload, base_url=view_base2)
+                result_urls = _collect_result_urls(payload, base_url=view_base2, output_node_ids=output_node_ids)
+                typed_result_urls = _collect_typed_result_urls(payload, base_url=view_base2, output_node_ids=output_node_ids)
 
-    file_paths: list[str] = []
+    file_paths: list[dict[str, Any]] = []  # {"path": str, "type": str}
     file_tokens: list[dict[str, Any]] = []
     writeback_errors: list[str] = []
     runlog_file_tokens: list[dict[str, Any]] = []
 
     need_send_media = bool(isinstance(chat_id, str) and chat_id and not record_id)
     if (write_back_enabled and bitable and table_cfg and bitable.mode.write_enabled and ctx.drive) or need_send_media:
-        output_items = _iter_output_items(payload)
+        output_items = _iter_output_items(payload, output_node_ids=output_node_ids)
         view_base = cb_ctx.get("comfyui_base_url")
         if not isinstance(view_base, str):
             view_base = ""
         for it in output_items:
+            bucket = it.get("_bucket")
+            otype = _classify_output_type(it, bucket_key=bucket if isinstance(bucket, str) else None)
+            content = it.get("content") if isinstance(it, dict) else None
+            if isinstance(content, str) and content.strip():
+                save_dir = ctx.settings.temp_download_dir
+                os.makedirs(save_dir, exist_ok=True)
+                name = _safe_filename(prompt_id or "text")
+                out_path = str(Path(save_dir) / f"{name}_text_{int(time.time() * 1000000)}.txt")
+                Path(out_path).write_text(content.strip(), encoding="utf-8")
+                file_paths.append({"path": out_path, "type": "text"})
+                continue
             url = it.get("fileUrl") or it.get("fileURL") or it.get("file_url") or it.get("url")
             if isinstance(url, str) and _is_http_url(url):
                 try:
@@ -1507,11 +1711,11 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
                 except Exception:
                     saved = None
                 if saved and _is_file_path(saved):
-                    file_paths.append(saved)
+                    file_paths.append({"path": saved, "type": otype})
                     continue
             fullpath = it.get("fullpath")
             if isinstance(fullpath, str) and _is_file_path(fullpath):
-                file_paths.append(fullpath)
+                file_paths.append({"path": fullpath, "type": otype})
                 continue
             filename = it.get("filename")
             if not isinstance(filename, str) or not filename:
@@ -1530,11 +1734,12 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
             except Exception:
                 saved = None
             if saved and _is_file_path(saved):
-                file_paths.append(saved)
+                file_paths.append({"path": saved, "type": otype})
 
         if not file_paths:
-            url_items = _iter_url_items(payload)
+            url_items = _iter_external_url_items(payload, output_node_ids=output_node_ids)
             for it in url_items:
+                otype = _classify_output_type(it, bucket_key=None)
                 url = it.get("fileUrl") or it.get("fileURL") or it.get("file_url") or it.get("url")
                 if not isinstance(url, str) or not _is_http_url(url):
                     continue
@@ -1545,16 +1750,18 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
                 except Exception:
                     saved = None
                 if saved and _is_file_path(saved):
-                    file_paths.append(saved)
+                    file_paths.append({"path": saved, "type": otype})
 
     if not file_paths:
         candidates = _extract_output_candidates(payload)
-        file_paths = [c for c in candidates if _is_file_path(c)]
+        raw_paths = [c for c in candidates if _is_file_path(c)]
+        file_paths = [{"path": p, "type": _classify_extension(Path(p).suffix)} for p in raw_paths]
 
     if file_paths:
         seen: set[str] = set()
-        uniq: list[str] = []
-        for fp in file_paths:
+        uniq: list[dict[str, Any]] = []
+        for entry in file_paths:
+            fp = entry["path"] if isinstance(entry, dict) else entry
             try:
                 ap = os.path.abspath(fp)
             except Exception:
@@ -1562,9 +1769,10 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
             if ap in seen:
                 continue
             seen.add(ap)
-            uniq.append(fp)
+            uniq.append({"path": fp, "type": entry.get("type", "image") if isinstance(entry, dict) else "image"})
         file_paths = uniq
 
+    typed_file_tokens: dict[str, list[dict[str, Any]]] = {"image": [], "video": [], "audio": [], "text": []}
     if (
         write_back_enabled
         and record_id
@@ -1574,14 +1782,20 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
         and bitable.mode.write_enabled
         and ctx.drive
     ):
-        for fp in file_paths:
+        for entry in file_paths:
+            fp = entry["path"] if isinstance(entry, dict) else entry
+            otype = entry.get("type", "image") if isinstance(entry, dict) else "image"
+            as_img = otype == "image"
             try:
                 up = await ctx.drive.upload_to_bitable(
                     app_token=table_cfg.app_token,
                     file_path=fp,
-                    as_image=_guess_is_image(fp),
+                    as_image=as_img,
                 )
-                file_tokens.append({"file_token": up.file_token})
+                token_dict = {"file_token": up.file_token}
+                file_tokens.append(token_dict)
+                if otype in typed_file_tokens:
+                    typed_file_tokens[otype].append(token_dict)
             except Exception as e:
                 msg = f"Failed to upload {fp}: {e}"
                 writeback_errors.append(msg)
@@ -1597,18 +1811,46 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
         and ctx.drive
         and file_paths
     ):
-        for fp in file_paths:
+        for entry in file_paths:
+            fp = entry["path"] if isinstance(entry, dict) else entry
+            otype = entry.get("type", "image") if isinstance(entry, dict) else "image"
+            as_img = otype == "image"
             try:
                 up = await ctx.drive.upload_to_bitable(
                     app_token=runlog_cfg.app_token,
                     file_path=fp,
-                    as_image=_guess_is_image(fp),
+                    as_image=as_img,
                 )
                 runlog_file_tokens.append({"file_token": up.file_token})
             except Exception as e:
                 msg = f"Failed to upload(runlog) {fp}: {e}"
                 writeback_errors.append(msg)
                 logging.warning(msg)
+
+    text_content: list[str] = []
+    for entry in file_paths:
+        fp = entry.get("path") if isinstance(entry, dict) else entry
+        otype = entry.get("type", "image") if isinstance(entry, dict) else "image"
+        if otype == "text":
+            try:
+                content = Path(fp).read_text(encoding="utf-8").strip()
+                if content:
+                    text_content.append(content)
+            except Exception:
+                pass
+
+    typed_outputs: dict[str, dict[str, list]] | None = None
+    if typed_file_tokens or typed_result_urls or text_content:
+        typed_outputs = {}
+        for otype in ("image", "video", "audio", "text"):
+            ft = typed_file_tokens.get(otype) or []
+            urls = typed_result_urls.get(otype) or []
+            tc = text_content if otype == "text" else []
+            if ft or urls or tc:
+                entry: dict[str, Any] = {"file_tokens": ft, "result_urls": urls}
+                if tc:
+                    entry["text_content"] = tc
+                typed_outputs[otype] = entry
 
     if write_back_enabled and record_id and bitable and table_cfg and bitable.mode.write_enabled:
         try:
@@ -1623,11 +1865,21 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
                 prompt_id=prompt_id,
                 error=err,
                 cb_ctx=cb_ctx if isinstance(cb_ctx, dict) else None,
+                typed_outputs=typed_outputs,
             )
         except Exception as e:
             msg = f"write back record failed: table={table_key} record={record_id} err={e}"
             writeback_errors.append(msg)
             logging.warning(msg)
+            # 至少把状态改为"失败"，避免记录卡在"执行中"
+            try:
+                if bitable and table_cfg and bitable.mode.write_enabled:
+                    status_field = table_cfg.fields.get("status")
+                    failed_value = table_cfg.status_values.get("failed")
+                    if status_field and failed_value:
+                        await bitable.update_record(record_id, {status_field: failed_value})
+            except Exception:
+                pass
 
     if write_back_enabled and run_log_record_id and runlog_bitable and runlog_cfg and getattr(runlog_bitable, "mode", None) and getattr(runlog_bitable.mode, "write_enabled", False):
         try:
@@ -1768,7 +2020,8 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
                     return True
                 raise RuntimeError("file too large to upload via im api")
 
-            for fp in file_paths:
+            for entry in file_paths:
+                fp = entry["path"] if isinstance(entry, dict) else entry
                 try:
                     if await _send_one_file(fp):
                         sent_any = True
@@ -1833,14 +2086,16 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
         dest_dir = os.path.join(result_dir, folder_name)
         os.makedirs(dest_dir, exist_ok=True)
 
-        for fp in file_paths:
+        for entry in file_paths:
+            fp = entry["path"] if isinstance(entry, dict) else entry
             try:
                 if fp and os.path.exists(fp):
                     shutil.copy2(fp, dest_dir)
             except Exception:
                 pass
 
-    for fp in file_paths:
+    for entry in file_paths:
+        fp = entry["path"] if isinstance(entry, dict) else entry
         try:
             if fp and os.path.exists(fp) and ctx.settings.temp_download_dir in os.path.abspath(fp):
                 os.remove(fp)
