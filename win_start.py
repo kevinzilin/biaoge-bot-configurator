@@ -244,6 +244,14 @@ def fix_workflow_config_path(root_dir, env_map):
     # 路径正确存在 → 确保写入绝对路径到 .env
     if wf and os.path.exists(wf):
         abs_path = os.path.abspath(wf)
+        # 如果直接指向 example 文件，复制到 workflows.local.json 再使用
+        example_path = os.path.join(config_dir, "workflows.example.json")
+        local_path = os.path.join(config_dir, "workflows.local.json")
+        if os.path.abspath(abs_path) == os.path.abspath(example_path) and not os.path.exists(local_path):
+            import shutil
+            shutil.copy2(example_path, local_path)
+            abs_path = os.path.abspath(local_path)
+            print(f"Created {local_path} from example")
         if abs_path != raw:
             update_dotenv(env_path, {"WORKFLOW_CONFIG_PATH": abs_path})
             env_map["WORKFLOW_CONFIG_PATH"] = abs_path
@@ -266,6 +274,14 @@ def fix_workflow_config_path(root_dir, env_map):
             break
 
     if picked:
+        # 如果找到的是 example 文件，复制到 workflows.local.json 再使用
+        example_path = os.path.join(config_dir, "workflows.example.json")
+        local_path = os.path.join(config_dir, "workflows.local.json")
+        if os.path.abspath(picked) == os.path.abspath(example_path) and not os.path.exists(local_path):
+            import shutil
+            shutil.copy2(example_path, local_path)
+            picked = os.path.abspath(local_path)
+            print(f"Created {local_path} from example")
         update_dotenv(env_path, {"WORKFLOW_CONFIG_PATH": picked})
         env_map["WORKFLOW_CONFIG_PATH"] = picked
         print(f"WORKFLOW_CONFIG_PATH fixed -> {picked}")

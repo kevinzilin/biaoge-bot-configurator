@@ -58,6 +58,7 @@ class Settings:
     callback_path: str
     workflow_config_path: str | None
     bot_log_level: str
+    save_task_request_params: bool
 
     @property
     def callback_url(self) -> str:
@@ -111,4 +112,5 @@ def load_settings(env_path: str | None = None) -> Settings:
         callback_path=os.environ.get("CALLBACK_PATH", "/comfyui/callback").strip(),
         workflow_config_path=(os.environ.get("WORKFLOW_CONFIG_PATH", "").strip() or None),
         bot_log_level=os.environ.get("BOT_LOG_LEVEL", "INFO").strip(),
+        save_task_request_params=to_bool(os.environ.get("SAVE_TASK_REQUEST_PARAMS", "1")),
     )

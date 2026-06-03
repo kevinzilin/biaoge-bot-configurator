@@ -56,7 +56,7 @@
       }
     },
     "runlog_table": {
-      "_说明": "运行日志表：记录每次工作流执行的详情，包括拆分批次、耗时、平台等。通过 workflow.runLogTable 关联。",
+      "_说明": "运行日志表：记录每次工作流执行的详情，包括拆分批次、耗时、平台等。通过 workflow.runLogTable 关联。fields 中可配置 output_image / output_text / output_video / output_audio 来启用按类型分流写入，任意一个配置了即生效（有映射就写入，无映射则跳过）；四个都未配置时走 output 单列兜底逻辑。",
       "app_token": "${BITABLE_APP_TOKEN_GPT}",
       "table_id": "${BITABLE_TABLE_ID_RUNLOG}",
       "view_id": "",
@@ -72,6 +72,14 @@
         "task_id": "任务ID",
         "task_status": "任务状态",
         "output": "生成结果",
+        "output_image": "",
+        "output_video": "",
+        "output_audio": "",
+        "output_text": "",
+        "_output_image说明": "按类型分流：图片输出列名（如 “结果图”），配了即开启分流模式，不填不启用",
+        "_output_video说明": "按类型分流：视频输出列名",
+        "_output_audio说明": "按类型分流：音频输出列名",
+        "_output_text说明": "按类型分流：文本输出列名（如 “llm提示词”）",
         "error_code": "错误码",
         "error_message": "错误信息",
         "submitted_at": "提交时间",

@@ -754,13 +754,13 @@ async def _update_runlog_record(
     payload: dict[str, Any],
     err: str | None,
     result_urls: list[str],
+    typed_outputs: dict[str, dict[str, list]] | None = None,
 ) -> None:
-    """把单条任务的最终结果写回运行记录表。
+    """把单条任务的最终结果写回运行记录表。支持按类型分流写入。
 
-    这个版本会先看“生成结果”列是什么类型：
-    - 如果是附件列，就写附件 token。
-    - 如果是文本列，就写可访问链接。
-    同时如果结果列写失败，也会尽量保住状态、完成时间这些基础信息先落表。
+    分流模式: fields 中配置了 output_image/output_text/output_video/output_audio
+    中任意一个即开启; 每个类型独立判断, 有映射就写入, 无映射则跳过。
+    兜底模式: 四个 key 都没配置时, 走 output 单列写入附件。
     """
     now_ms = int(time.time() * 1000)
     submitted_ms = run_log_submitted_at_ms
@@ -805,47 +805,104 @@ async def _update_runlog_record(
     if message_col:
         updates[message_col] = "" if ok else str(err or "")
 
-    output_col = _col("output")
-    output_tokens = payload.get("runlog_output_file_tokens")
-    output_tokens = output_tokens if isinstance(output_tokens, list) else []
-    clean_urls = [str(item).strip() for item in (result_urls or []) if str(item).strip()]
-    if output_col:
-        meta_map: dict[str, dict[str, Any]] = {}
-        cache_key = "runlog::" + (str(getattr(runlog_cfg, "table_id", "") or "").strip() or str(output_col))
-        now = time.time()
+    # ---- fields meta cache helper (runlog-specific) ----
+    _TYPE_CODES: dict[str, int] = {"image": 17, "video": 17, "audio": 17, "text": 1}
 
+    async def _load_runlog_meta() -> dict[str, dict[str, Any]]:
+        cache_key = "runlog::" + (str(getattr(runlog_cfg, "table_id", "") or "").strip() or "runlog_meta")
+        t = time.time()
         async with _FIELDS_META_CACHE_LOCK:
             cached = _FIELDS_META_CACHE.get(cache_key)
-        if cached and (now - float(cached[0] or 0.0)) < 300:
-            meta_map = cached[1]
-        else:
-            items: list[dict[str, Any]] = []
-            if hasattr(runlog_bitable, "list_fields"):
-                try:
-                    items = await runlog_bitable.list_fields()
-                except Exception:
-                    items = []
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                field_name = item.get("field_name")
-                if isinstance(field_name, str) and field_name:
-                    meta_map[field_name] = item
-            async with _FIELDS_META_CACHE_LOCK:
-                _FIELDS_META_CACHE[cache_key] = (now, meta_map)
+        if cached and (t - float(cached[0] or 0.0)) < 300:
+            return cached[1]
+        items: list[dict[str, Any]] = []
+        if hasattr(runlog_bitable, "list_fields"):
+            try:
+                items = await runlog_bitable.list_fields()
+            except Exception:
+                items = []
+        meta: dict[str, dict[str, Any]] = {}
+        for it in items:
+            if isinstance(it, dict):
+                fn = it.get("field_name")
+                if isinstance(fn, str) and fn:
+                    meta[fn] = it
+        async with _FIELDS_META_CACHE_LOCK:
+            _FIELDS_META_CACHE[cache_key] = (t, meta)
+        return meta
 
-        ui_type = ""
+    async def _ensure_runlog_field(field_name: str, field_type_code: int) -> bool:
+        meta = await _load_runlog_meta()
+        if field_name in meta:
+            return True
         try:
-            ui_type = str((meta_map.get(output_col) or {}).get("ui_type") or "")
+            new_field = await runlog_bitable.create_field(field_name=field_name, field_type=field_type_code)
+            if isinstance(new_field, dict) and new_field:
+                cache_key = "runlog::" + (str(getattr(runlog_cfg, "table_id", "") or "").strip() or "runlog_meta")
+                async with _FIELDS_META_CACHE_LOCK:
+                    _FIELDS_META_CACHE.pop(cache_key, None)
+                return True
         except Exception:
-            ui_type = ""
-        want_attachment = "Attachment" in ui_type
+            pass
+        return False
 
-        if want_attachment:
-            if output_tokens:
-                updates[output_col] = output_tokens
-        elif clean_urls:
-            updates[output_col] = "\n".join(clean_urls)
+    # ---- typed output writeback (按类型分流) ----
+    # 从 runlog 表自身的 fields 读取分流列映射
+    # output_image / output_text / output_video / output_audio
+    _RUNLOG_TYPE_KEYS = {
+        "image": "output_image",
+        "video": "output_video",
+        "audio": "output_audio",
+        "text": "output_text",
+    }
+    type_to_field: dict[str, str] = {}
+    for otype, cfg_key in _RUNLOG_TYPE_KEYS.items():
+        col = _col(cfg_key)
+        if col:
+            type_to_field[otype] = col
+
+    if type_to_field and typed_outputs:
+        for otype in ("image", "video", "audio", "text"):
+            field_name = type_to_field.get(otype)
+            if not field_name:
+                continue
+            data = typed_outputs.get(otype) or {}
+            ft = data.get("file_tokens") or []
+            urls = data.get("result_urls") or []
+            tc = data.get("text_content") or []
+            if not ft and not urls and not tc:
+                continue
+
+            ft_code = _TYPE_CODES.get(otype, 17)
+            if not await _ensure_runlog_field(field_name, ft_code):
+                continue
+            meta_map = await _load_runlog_meta()
+            ui_type = str((meta_map.get(field_name) or {}).get("ui_type") or "")
+            want_attachment = "Attachment" in ui_type
+
+            if otype == "text" and tc:
+                updates[field_name] = "\n\n".join(tc)
+            elif want_attachment:
+                if ft:
+                    updates[field_name] = ft
+            else:
+                if urls:
+                    updates[field_name] = "\n".join(urls)
+    else:
+        # ---- fallback: single output column ----
+        output_col = _col("output")
+        output_tokens = payload.get("runlog_output_file_tokens")
+        output_tokens = output_tokens if isinstance(output_tokens, list) else []
+        clean_urls = [str(item).strip() for item in (result_urls or []) if str(item).strip()]
+        if output_col:
+            meta_map = await _load_runlog_meta()
+            ui_type = str((meta_map.get(output_col) or {}).get("ui_type") or "")
+            want_attachment = "Attachment" in ui_type
+            if want_attachment:
+                if output_tokens:
+                    updates[output_col] = output_tokens
+            elif clean_urls:
+                updates[output_col] = "\n".join(clean_urls)
 
     if not updates:
         return
@@ -858,12 +915,6 @@ async def _update_runlog_record(
         if matched:
             missing = matched.group(1)
             updates2 = {key: value for key, value in updates.items() if str(key) != missing}
-            if updates2 and updates2 != updates:
-                await runlog_bitable.update_record(str(run_log_record_id), updates2)
-                return
-
-        if output_col and output_col in updates:
-            updates2 = {key: value for key, value in updates.items() if str(key) != str(output_col)}
             if updates2 and updates2 != updates:
                 await runlog_bitable.update_record(str(run_log_record_id), updates2)
                 return
@@ -1689,6 +1740,15 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
     need_send_media = bool(isinstance(chat_id, str) and chat_id and not record_id)
     if (write_back_enabled and bitable and table_cfg and bitable.mode.write_enabled and ctx.drive) or need_send_media:
         output_items = _iter_output_items(payload, output_node_ids=output_node_ids)
+        text_items_debug = [it for it in output_items if (isinstance(it, dict) and it.get("_bucket") == "text")]
+        logging.info(
+            "output_items: total=%d text_items=%d text_content_items=%d text_url_items=%d output_node_ids=%s",
+            len(output_items),
+            len(text_items_debug),
+            sum(1 for it in text_items_debug if isinstance(it.get("content"), str) and it.get("content", "").strip()),
+            sum(1 for it in text_items_debug if isinstance(it.get("url"), str) and it.get("url", "").strip()),
+            output_node_ids,
+        )
         view_base = cb_ctx.get("comfyui_base_url")
         if not isinstance(view_base, str):
             view_base = ""
@@ -1703,6 +1763,7 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
                 out_path = str(Path(save_dir) / f"{name}_text_{int(time.time() * 1000000)}.txt")
                 Path(out_path).write_text(content.strip(), encoding="utf-8")
                 file_paths.append({"path": out_path, "type": "text"})
+                logging.info("text_content saved: len=%d preview=%s", len(content.strip()), content.strip()[:200])
                 continue
             url = it.get("fileUrl") or it.get("fileURL") or it.get("file_url") or it.get("url")
             if isinstance(url, str) and _is_http_url(url):
@@ -1838,6 +1899,13 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
                     text_content.append(content)
             except Exception:
                 pass
+    logging.info(
+        "text pipeline: file_paths_text=%d text_content_len=%d typed_file_tokens=%s typed_result_urls=%s",
+        sum(1 for e in file_paths if (e.get("type") if isinstance(e, dict) else "image") == "text"),
+        len(text_content),
+        {k: len(v) for k, v in typed_file_tokens.items()} if typed_file_tokens else {},
+        {k: len(v) for k, v in typed_result_urls.items()} if typed_result_urls else {},
+    )
 
     typed_outputs: dict[str, dict[str, list]] | None = None
     if typed_file_tokens or typed_result_urls or text_content:
@@ -1851,6 +1919,11 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
                 if tc:
                     entry["text_content"] = tc
                 typed_outputs[otype] = entry
+    logging.info(
+        "typed_outputs: types=%s text_data=%s",
+        list(typed_outputs.keys()) if typed_outputs else None,
+        bool(typed_outputs.get("text") if typed_outputs else None),
+    )
 
     if write_back_enabled and record_id and bitable and table_cfg and bitable.mode.write_enabled:
         try:
@@ -1895,6 +1968,7 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
                 payload=payload_for_runlog,
                 err=err,
                 result_urls=result_urls,
+                typed_outputs=typed_outputs,
             )
         except Exception as e:
             msg = f"write runlog failed: table={run_log_table_key} record={run_log_record_id} err={e}"

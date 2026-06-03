@@ -3,14 +3,18 @@
     "scopes": [
       "im:message",
       "im:message:send_as_bot",
+      "im:image",
+      "im:file",
       "drive:drive",
+      "drive:drive:readonly",
       "bitable:app"
     ]
   },
   "用户身份": {
     "scopes": [
       "drive:drive",
-      "bitable:app"
+      "bitable:app",
+      "drive:drive:readonly"
     ]
   },
   "事件订阅": {

@@ -762,8 +762,14 @@ async def _download_attachments(
         if not token:
             continue
         file_name = it.get("name") or it.get("file_name") or it.get("fileName")
+        # 飞书返回的附件对象包含 url 字段，格式为完整下载链接（含 extra 参数，用于高级权限多维表格）
+        attachment_url = it.get("url") if isinstance(it.get("url"), str) and str(it.get("url")).strip() else None
         download_dir = ctx.settings.temp_download_dir if provider == "runninghub" else (ctx.settings.temp_download_dir if ctx.settings.comfyui_upload_enabled else (ctx.settings.comfyui_input_dir or ctx.settings.temp_download_dir))
-        saved = await ctx.drive.download_media(file_token=str(token), download_dir=download_dir, file_name=str(file_name) if file_name else None)
+        try:
+            saved = await ctx.drive.download_media(file_token=str(token), download_dir=download_dir, file_name=str(file_name) if file_name else None, download_url=attachment_url)
+        except TypeError:
+            # 旧版 drive.pyd 不支持 download_url 参数，降级调用
+            saved = await ctx.drive.download_media(file_token=str(token), download_dir=download_dir, file_name=str(file_name) if file_name else None)
         if provider == "runninghub":
             if not runninghub:
                 continue
@@ -1414,13 +1420,32 @@ async def run_workflow(
             field_name = record_field_map.get(param_key) or param_key
             if field_name in record_fields:
                 raw_val = record_fields.get(field_name)
-                downloaded = await _download_attachments(
-                    ctx,
-                    provider=provider,
-                    comfyui=comfyui_client,
-                    runninghub=runninghub_client,
-                    value=raw_val,
-                )
+                try:
+                    downloaded = await _download_attachments(
+                        ctx,
+                        provider=provider,
+                        comfyui=comfyui_client,
+                        runninghub=runninghub_client,
+                        value=raw_val,
+                    )
+                except Exception as e:
+                    err_msg = f"下载附件失败(param={param_key}): {e}"
+                    logging.exception("download_attachments failed for record=%s param=%s", record_id, param_key)
+                    if record_id and not record_id.startswith("mock_rec_") and bitable and table_cfg and bitable.mode.write_enabled:
+                        error_field = table_cfg.fields.get("error")
+                        status_field = table_cfg.fields.get("status")
+                        failed_value = table_cfg.status_values.get("failed")
+                        updates: dict[str, Any] = {}
+                        if allow_write_error and (not split_active) and error_field:
+                            updates[error_field] = err_msg
+                        if status_field and failed_value:
+                            updates[status_field] = failed_value
+                        if updates:
+                            try:
+                                await bitable.update_record(record_id, updates)
+                            except Exception:
+                                pass
+                    raise RuntimeError(err_msg) from e
                 v = downloaded if downloaded else raw_val
                 v = _normalize_bitable_value_for_param(v, wf, param_key)
                 if isinstance(merged.get(param_key), list) and isinstance(v, list):
@@ -1579,6 +1604,27 @@ async def run_workflow(
                 if not prompt_id:
                     logging.warning("runninghub create_task succeeded but task_id is missing: workflow=%s", workflow_key)
                     err_msg = "RunningHub 创建任务成功但未返回 task_id，无法跟踪任务状态"
+                if ctx.settings.save_task_request_params:
+                    try:
+                        save_dir = ctx.settings.temp_download_dir
+                        os.makedirs(save_dir, exist_ok=True)
+                        dump: dict[str, Any] = {
+                            "provider": provider,
+                            "workflow_key": workflow_key,
+                            "workflow_name": getattr(wf, "workflow_name", workflow_key),
+                            "task_id": prompt_id,
+                            "runninghub_workflow_id": workflow_id,
+                            "node_info_list": node_info_list,
+                        }
+                        ts = int(time.time() * 1000)
+                        wf_slug = str(workflow_key).replace("/", "_").replace("\\", "_")[:60]
+                        pid_short = str(prompt_id or "noid")[:24].replace("/", "_").replace("\\", "_")
+                        dump_path = os.path.join(save_dir, f"submit_{wf_slug}_{pid_short}_{ts}.json")
+                        with open(dump_path, "w", encoding="utf-8") as f:
+                            json.dump(dump, f, ensure_ascii=False, indent=2, default=str)
+                        logging.info("Submission dump written to %s", dump_path)
+                    except Exception:
+                        pass
             else:
                 prompt_id = await queue_by_workflowprompt(
                     comfyui_client,
@@ -1588,6 +1634,35 @@ async def run_workflow(
                 )
                 if not prompt_id and not err_msg:
                     err_msg = "ComfyUI 提交任务成功但未返回 prompt_id，无法跟踪任务状态"
+                if ctx.settings.save_task_request_params:
+                    try:
+                        save_dir = ctx.settings.temp_download_dir
+                        os.makedirs(save_dir, exist_ok=True)
+                        dump: dict[str, Any] = {
+                            "provider": provider,
+                            "workflow_key": workflow_key,
+                            "workflow_name": getattr(wf, "workflow_name", workflow_key),
+                            "prompt_id": prompt_id,
+                            "comfyui_base_url": comfyui_base_url,
+                            "node_info_list": node_info_list,
+                            "extra_data": extra_data,
+                        }
+                        api_path = getattr(wf, "api_workflow_path", None)
+                        if api_path:
+                            dump["api_workflow_path"] = api_path
+                            try:
+                                dump["api_workflow_json"] = json.loads(Path(api_path).read_text(encoding="utf-8"))
+                            except Exception:
+                                dump["api_workflow_json"] = "(failed to read)"
+                        ts = int(time.time() * 1000)
+                        wf_slug = str(workflow_key).replace("/", "_").replace("\\", "_")[:60]
+                        pid_short = str(prompt_id or "noid")[:24].replace("/", "_").replace("\\", "_")
+                        dump_path = os.path.join(save_dir, f"submit_{wf_slug}_{pid_short}_{ts}.json")
+                        with open(dump_path, "w", encoding="utf-8") as f:
+                            json.dump(dump, f, ensure_ascii=False, indent=2, default=str)
+                        logging.info("Submission dump written to %s", dump_path)
+                    except Exception:
+                        pass
 
             if prompt_id:
                 prompt_ids.append(prompt_id)
@@ -1705,6 +1780,37 @@ async def run_workflow(
         body_short = body_text.strip()
         if len(body_short) > 800:
             body_short = body_short[:800] + "..."
+        # 将请求参数写入 temp 目录，方便排查
+        try:
+            save_dir = ctx.settings.temp_download_dir
+            os.makedirs(save_dir, exist_ok=True)
+            dump: dict[str, Any] = {
+                "provider": provider,
+                "workflow_key": workflow_key,
+                "workflow_name": getattr(wf, "workflow_name", workflow_key),
+                "http_status": status,
+                "response_body": body_text.strip()[:2000],
+            }
+            if provider != "runninghub":
+                dump["node_info_list"] = node_info_list
+                dump["extra_data"] = extra_data
+                api_path = getattr(wf, "api_workflow_path", None)
+                if api_path:
+                    dump["api_workflow_path"] = api_path
+                    try:
+                        dump["api_workflow_json"] = json.loads(Path(api_path).read_text(encoding="utf-8"))
+                    except Exception:
+                        dump["api_workflow_json"] = "(failed to read)"
+            else:
+                dump["runninghub_workflow_id"] = cfg_for_wf.get("runninghubWorkflowId") if isinstance(cfg_for_wf, dict) else None
+            ts = int(time.time() * 1000)
+            wf_slug = str(workflow_key).replace("/", "_").replace("\\", "_")[:60]
+            dump_path = os.path.join(save_dir, f"comfyui_error_{wf_slug}_{ts}.json")
+            with open(dump_path, "w", encoding="utf-8") as f:
+                json.dump(dump, f, ensure_ascii=False, indent=2, default=str)
+            logging.info("Request debug dump written to %s", dump_path)
+        except Exception:
+            logging.exception("Failed to write request debug dump")
         if provider == "runninghub":
             err_msg = f"HTTPError {status if status is not None else 'unknown'}: {e}"
         else:

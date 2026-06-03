@@ -56,7 +56,9 @@ class WorkflowRegistry:
         workflows = config.get("workflows") or {}
         specs: dict[str, WorkflowSpec] = {}
         for key, raw in workflows.items():
-            wf_name = (raw or {}).get("workflowName") or key
+            if not isinstance(raw, dict):
+                continue
+            wf_name = raw.get("workflowName") or key
             api_path = (raw or {}).get("apiWorkflowPath")
             api_workflow_path = str(api_path).strip() if isinstance(api_path, str) and str(api_path).strip() else None
             params: dict[str, ParamSpec] = {}

@@ -388,6 +388,16 @@ if ($envMap.ContainsKey("WORKFLOW_CONFIG_PATH")) {
   # Path exists -> write absolute path back to .env
   if ($wf -and (Test-Path $wf)) {
     try { $absPath = (Resolve-Path -LiteralPath $wf).Path } catch { $absPath = $wf }
+    # If directly pointing to example file, copy to workflows.local.json instead
+    $examplePath = Join-Path $configDir "workflows.example.json"
+    $localPath = Join-Path $configDir "workflows.local.json"
+    try {
+      if ((Resolve-Path -LiteralPath $absPath).Path -eq (Resolve-Path -LiteralPath $examplePath).Path -and (-not (Test-Path $localPath))) {
+        Copy-Item -Path $examplePath -Destination $localPath
+        $absPath = (Resolve-Path -LiteralPath $localPath).Path
+        Write-Host ("Created " + $localPath + " from example") -ForegroundColor Green
+      }
+    } catch {}
     if ($absPath -ne $raw) {
       Update-DotEnv -Path $envPath -Updates @{ WORKFLOW_CONFIG_PATH = $absPath }
       $envMap["WORKFLOW_CONFIG_PATH"] = $absPath
@@ -412,6 +422,16 @@ if ($envMap.ContainsKey("WORKFLOW_CONFIG_PATH")) {
 
     if ($picked) {
       try { $picked = (Resolve-Path -LiteralPath $picked).Path } catch {}
+      # If we picked the example file, copy to workflows.local.json instead
+      $examplePath = Join-Path $configDir "workflows.example.json"
+      $localPath = Join-Path $configDir "workflows.local.json"
+      try {
+        if ((Resolve-Path -LiteralPath $picked).Path -eq (Resolve-Path -LiteralPath $examplePath).Path -and (-not (Test-Path $localPath))) {
+          Copy-Item -Path $examplePath -Destination $localPath
+          $picked = (Resolve-Path -LiteralPath $localPath).Path
+          Write-Host ("Created " + $localPath + " from example") -ForegroundColor Green
+        }
+      } catch {}
       Update-DotEnv -Path $envPath -Updates @{ WORKFLOW_CONFIG_PATH = $picked }
       $envMap["WORKFLOW_CONFIG_PATH"] = $picked
       Write-Host ("WORKFLOW_CONFIG_PATH fixed -> " + $picked) -ForegroundColor Green

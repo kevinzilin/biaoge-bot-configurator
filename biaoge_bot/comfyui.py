@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,6 +27,40 @@ def _guess_mime(filename: str) -> str:
 class ComfyQueued:
     prompt_id: str | None
     raw: dict[str, Any]
+
+
+def _dump_failed_request(response: httpx.Response, payload: dict[str, Any] | None) -> None:
+    """将失败的请求参数和响应写入 temp_downloads 目录"""
+    try:
+        save_dir = os.path.join(os.getcwd(), "temp_downloads")
+        os.makedirs(save_dir, exist_ok=True)
+        body_text = ""
+        try:
+            ct = str(response.headers.get("content-type") or "").lower()
+            if "application/json" in ct:
+                body_text = json.dumps(response.json(), ensure_ascii=False)
+            else:
+                body_text = response.text
+        except Exception:
+            try:
+                body_text = response.text
+            except Exception:
+                body_text = "(failed to read body)"
+        dump: dict[str, Any] = {
+            "url": str(response.request.url) if response.request else str(response.url),
+            "status_code": response.status_code,
+            "request_payload": payload,
+            "response_body": body_text.strip()[:5000] if body_text else "",
+        }
+        ts = int(time.time() * 1000)
+        wf_name = str(payload.get("workflowName") or payload.get("workflow_name") or "unknown") if payload else "unknown"
+        wf_slug = wf_name.replace("/", "_").replace("\\", "_")[:60]
+        dump_path = os.path.join(save_dir, f"comfyui_error_{wf_slug}_{ts}.json")
+        with open(dump_path, "w", encoding="utf-8") as f:
+            json.dump(dump, f, ensure_ascii=False, indent=2, default=str)
+        logging.info("ComfyUI request debug dump written to %s", dump_path)
+    except Exception:
+        logging.exception("Failed to write ComfyUI request debug dump")
 
 
 class ComfyUIClient:
@@ -78,10 +115,12 @@ class ComfyUIClient:
         payloads.append(p3)
 
         last: httpx.Response | None = None
+        last_payload: dict[str, Any] | None = None
         async with httpx.AsyncClient(timeout=30) as client:
             for payload in payloads:
                 r = await client.post(f"{self._base_url}/prompt_workflow", json=payload)
                 last = r
+                last_payload = payload
                 if 200 <= r.status_code < 300:
                     data = r.json()
                     return ComfyQueued(prompt_id=data.get("prompt_id"), raw=data)
@@ -89,6 +128,7 @@ class ComfyUIClient:
                     r.raise_for_status()
         if last is None:
             raise RuntimeError("queue_workflow failed: no response")
+        _dump_failed_request(last, last_payload)
         last.raise_for_status()
         raise RuntimeError("queue_workflow failed")
 
@@ -132,6 +172,8 @@ class ComfyUIClient:
                 content=json.dumps(prompt_payload, ensure_ascii=False).encode("utf-8"),
                 headers={"Content-Type": "application/json; charset=utf-8"},
             )
+            if r.status_code < 200 or r.status_code >= 300:
+                _dump_failed_request(r, prompt_payload)
             r.raise_for_status()
             data = r.json()
             return ComfyQueued(prompt_id=data.get("prompt_id"), raw=data)
