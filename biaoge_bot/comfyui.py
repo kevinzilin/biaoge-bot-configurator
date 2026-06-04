@@ -63,6 +63,57 @@ def _dump_failed_request(response: httpx.Response, payload: dict[str, Any] | Non
         logging.exception("Failed to write ComfyUI request debug dump")
 
 
+def _read_response_text(response: httpx.Response) -> str:
+    try:
+        ct = str(response.headers.get("content-type") or "").lower()
+        if "application/json" in ct:
+            return json.dumps(response.json(), ensure_ascii=False)
+        return response.text
+    except Exception:
+        try:
+            return response.text
+        except Exception:
+            return ""
+
+
+def _looks_like_retryable_workflow_payload_error(response: httpx.Response) -> bool:
+    status = int(getattr(response, "status_code", 0) or 0)
+    if status not in (400, 404, 422):
+        return False
+    body = _read_response_text(response).lower()
+    if not body:
+        return False
+    # 这些属于“请求已经被插件真正处理过，但业务校验失败”，绝不能继续试第二种 payload，
+    # 否则同一个子任务可能被重复提交。
+    terminal_markers = (
+        "nodeinfolist_invalid",
+        "workflow_not_found",
+        "prompt_outputs_failed_validation",
+        "node_not_found",
+        "\"msg\": \"error\"",
+        "\"status\": \"error\"",
+    )
+    if any(marker in body for marker in terminal_markers):
+        return False
+    # 只有看起来像“字段名/请求外壳不匹配”时，才允许尝试下一种 payload 写法。
+    retryable_markers = (
+        "field required",
+        "missing",
+        "workflowname",
+        "workflow_name",
+        "nodeinfolist",
+        "node_info_list",
+        "clientid",
+        "client_id",
+        "unexpected keyword",
+        "extra fields not permitted",
+        "unrecognized field",
+        "invalid request body",
+        "invalid payload",
+    )
+    return any(marker in body for marker in retryable_markers)
+
+
 class ComfyUIClient:
     def __init__(self, base_url: str) -> None:
         self._base_url = base_url.rstrip("/")
@@ -92,32 +143,32 @@ class ComfyUIClient:
 
         node_list = normalize_node_info_list(node_info_list)
 
-        payloads: list[dict[str, Any]] = []
+        payloads: list[tuple[str, dict[str, Any]]] = []
         p1: dict[str, Any] = {"workflowName": workflow_name, "client_id": client_id}
         if node_list is not None:
             p1["nodeInfoList"] = node_list
         if extra_data is not None:
             p1["extra_data"] = extra_data
-        payloads.append(p1)
+        payloads.append(("camel_case", p1))
 
         p2: dict[str, Any] = {"workflow_name": workflow_name, "client_id": client_id}
         if node_list is not None:
             p2["node_info_list"] = node_list
         if extra_data is not None:
             p2["extra_data"] = extra_data
-        payloads.append(p2)
+        payloads.append(("snake_case", p2))
 
         p3: dict[str, Any] = {"workflowName": workflow_name, "clientId": client_id}
         if node_list is not None:
             p3["nodeInfoList"] = node_list
         if extra_data is not None:
             p3["extraData"] = extra_data
-        payloads.append(p3)
+        payloads.append(("legacy_client_id", p3))
 
         last: httpx.Response | None = None
         last_payload: dict[str, Any] | None = None
         async with httpx.AsyncClient(timeout=30) as client:
-            for payload in payloads:
+            for idx, (variant_name, payload) in enumerate(payloads):
                 r = await client.post(f"{self._base_url}/prompt_workflow", json=payload)
                 last = r
                 last_payload = payload
@@ -126,6 +177,22 @@ class ComfyUIClient:
                     return ComfyQueued(prompt_id=data.get("prompt_id"), raw=data)
                 if r.status_code not in (400, 404, 422):
                     r.raise_for_status()
+                if idx < len(payloads) - 1 and _looks_like_retryable_workflow_payload_error(r):
+                    logging.warning(
+                        "prompt_workflow variant failed but looks retryable, trying next variant: variant=%s status=%s body=%s",
+                        variant_name,
+                        r.status_code,
+                        _read_response_text(r)[:300],
+                    )
+                    continue
+                logging.warning(
+                    "prompt_workflow variant failed and will stop retrying: variant=%s status=%s body=%s",
+                    variant_name,
+                    r.status_code,
+                    _read_response_text(r)[:300],
+                )
+                _dump_failed_request(r, payload)
+                r.raise_for_status()
         if last is None:
             raise RuntimeError("queue_workflow failed: no response")
         _dump_failed_request(last, last_payload)

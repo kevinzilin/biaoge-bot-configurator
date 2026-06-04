@@ -276,9 +276,9 @@ def _pick_table_key_for_workflow(
     return ctx.default_table_key if allow_default else None
 
 
-def _should_fallback_to_api_workflow(status_code: int | None) -> bool:
-    """只在 WorkflowPrompt 明确不可用/工作流不存在时才走 apiWorkflowPath 降级。"""
-    return int(status_code or 0) == 404
+def _should_fallback_to_api_workflow(body_text: str, body_obj: dict[str, Any] | None) -> bool:
+    """只在错误内容明确指向“工作流不存在/插件不可用”时才走 apiWorkflowPath 降级。"""
+    return _looks_like_workflow_missing(body_text, body_obj)
 
 
 def _parse_json_object(text: str) -> dict[str, Any] | None:
@@ -305,13 +305,14 @@ def _looks_like_workflow_missing(body_text: str, body_obj: dict[str, Any] | None
             ])
     joined = "\n".join(msg_parts)
     patterns = (
+        "workflow_not_found",
         "workflow not found",
         "workflow does not exist",
         "unknown workflow",
         "cannot find workflow",
         "no workflow",
         "route not found",
-        "not found",
+        "plugin unavailable",
         "plugin not installed",
     )
     return any(p in joined for p in patterns)
@@ -343,7 +344,7 @@ def _build_workflowprompt_user_error(
     body_text: str,
 ) -> tuple[str, bool]:
     body_obj = _parse_json_object(body_text)
-    fallback_allowed = _should_fallback_to_api_workflow(status_code) or _looks_like_workflow_missing(body_text, body_obj)
+    fallback_allowed = _should_fallback_to_api_workflow(body_text, body_obj)
 
     error_block = body_obj.get("error") if isinstance(body_obj, dict) else None
     error_type = str(error_block.get("type") or "") if isinstance(error_block, dict) else ""
@@ -1300,10 +1301,33 @@ async def run_workflow(
         and (ctx.settings.bitable_mode or "").strip().lower() not in ("write", "writeonly", "wo")
     )
     if use_record_fields:
-        rec = await bitable.get_record(record_id)
-        record_fields = _extract_record_fields(rec)
+        try:
+            rec = await bitable.get_record(record_id)
+            record_fields = _extract_record_fields(rec)
+        except Exception as e:
+            # 读取记录失败时，更新状态为失败
+            err_msg = f"读取表格记录失败: {str(e)}"
+            if record_id and not record_id.startswith("mock_rec_") and bitable and table_cfg and bitable.mode.write_enabled:
+                wf_fields0 = cfg_for_wf.get("writeBackFields") if isinstance(cfg_for_wf, dict) else None
+                allow_write_error0 = True if not isinstance(wf_fields0, dict) else ("error" in wf_fields0)
+                error_field = table_cfg.fields.get("error")
+                status_field = table_cfg.fields.get("status")
+                failed_value = table_cfg.status_values.get("failed")
+                updates: dict[str, Any] = {}
+                if allow_write_error0 and error_field:
+                    updates[error_field] = err_msg
+                if status_field and failed_value:
+                    updates[status_field] = failed_value
+                if updates:
+                    try:
+                        await bitable.update_record(record_id, updates)
+                    except Exception:
+                        pass
+            raise RuntimeError(err_msg)
 
     raw_cfg = (ctx.config.get("workflows") or {}).get(wf.key) or {}
+    api_workflow_path = raw_cfg.get("apiWorkflowPath") or raw_cfg.get("api_workflow_path") if isinstance(raw_cfg, dict) else None
+    api_workflow_path = str(api_workflow_path).strip() if isinstance(api_workflow_path, str) and str(api_workflow_path).strip() else None
     wf_write_back_fields = raw_cfg.get("writeBackFields")
     allow_write_prompt_id = True
     allow_write_error = True
@@ -1318,104 +1342,171 @@ async def run_workflow(
     if isinstance(raw_defaults, dict):
         merged.update(raw_defaults)
     split_param: str | None = None
+    # 辅助函数：计算多个列表的笛卡尔积
+    def _cartesian_product(lists):
+        if not lists:
+            return [{}]
+        result = [{}]
+        for key, items in lists:
+            new_result = []
+            for d in result:
+                for item in items:
+                    new_d = dict(d)
+                    new_d.update(item)
+                    new_result.append(new_d)
+            result = new_result
+        return result
     if use_record_fields:
-        record_field_map = raw_cfg.get("recordFields") or {}
-        relation_prompt = raw_cfg.get("relationPrompt") or raw_cfg.get("relation_prompt")
-        if isinstance(relation_prompt, dict):
-            src_field = relation_prompt.get("sourceField") or relation_prompt.get("source_field")
-            src_field = str(src_field).strip() if isinstance(src_field, str) and str(src_field).strip() else None
-            prompt_param = relation_prompt.get("targetParam") or relation_prompt.get("target_param") or "prompt"
-            prompt_param = str(prompt_param).strip() if isinstance(prompt_param, str) and str(prompt_param).strip() else "prompt"
-            tgt_key = relation_prompt.get("targetTableKey") or relation_prompt.get("target_table_key")
-            tgt_key = str(tgt_key).strip() if isinstance(tgt_key, str) and str(tgt_key).strip() else None
-            tgt_app = relation_prompt.get("targetAppToken") or relation_prompt.get("target_app_token") or relation_prompt.get("app_token")
-            tgt_app = str(tgt_app).strip() if isinstance(tgt_app, str) and str(tgt_app).strip() else None
-            tgt_tid = relation_prompt.get("targetTableId") or relation_prompt.get("target_table_id") or relation_prompt.get("table_id")
-            tgt_tid = str(tgt_tid).strip() if isinstance(tgt_tid, str) and str(tgt_tid).strip() else None
-            tgt_match = relation_prompt.get("targetMatchField") or relation_prompt.get("target_match_field")
-            tgt_match = str(tgt_match).strip() if isinstance(tgt_match, str) and str(tgt_match).strip() else None
-            ipm_raw = relation_prompt.get("itemParamMap") or relation_prompt.get("item_param_map") or relation_prompt.get("item_params") or {}
-            item_param_map: dict[str, str] = {}
-            if isinstance(ipm_raw, dict):
-                for k, v in ipm_raw.items():
-                    kk = str(k or "").strip()
-                    vv = str(v or "").strip()
-                    if kk and vv:
-                        item_param_map[kk] = vv
-            pf = relation_prompt.get("promptFields") or relation_prompt.get("prompt_fields") or []
-            prompt_fields: list[str] = []
-            if isinstance(pf, list):
-                for x in pf:
-                    if isinstance(x, str) and x.strip():
-                        prompt_fields.append(x.strip())
-            elif isinstance(pf, str) and pf.strip():
-                prompt_fields = [pf.strip()]
-            join_with = relation_prompt.get("joinWith") or relation_prompt.get("join_with") or "\n"
-            join_with = str(join_with) if isinstance(join_with, str) else "\n"
-            max_items = relation_prompt.get("maxItems") or relation_prompt.get("max_items") or 20
-            max_items = int(max_items) if isinstance(max_items, int) else (int(str(max_items)) if str(max_items).strip().isdigit() else 20)
-            max_items = max(1, min(100, max_items))
-            enable_split = relation_prompt.get("split")
-            enable_split = True if enable_split is None else bool(enable_split)
-            strict = relation_prompt.get("strict")
-            strict = True if strict is None else bool(strict)
-            enable_item_param_map = relation_prompt.get("enableItemParamMap") if isinstance(relation_prompt.get("enableItemParamMap"), bool) else relation_prompt.get("enable_item_param_map")
-            enable_item_param_map = True if enable_item_param_map is None else bool(enable_item_param_map)
-            enable_prompt_fields = relation_prompt.get("enablePromptFields") if isinstance(relation_prompt.get("enablePromptFields"), bool) else relation_prompt.get("enable_prompt_fields")
-            enable_prompt_fields = True if enable_prompt_fields is None else bool(enable_prompt_fields)
-            has_item_targets = enable_item_param_map and bool(item_param_map) and any((k in wf.params) for k in item_param_map.keys())
-            if src_field and has_item_targets:
-                src_val = record_fields.get(src_field)
-                related_items = await _resolve_relation_param_items(
-                    ctx,
-                    source_value=src_val,
-                    target_app_token=tgt_app,
-                    target_table_id=tgt_tid,
-                    target_table_key=tgt_key,
-                    target_match_field=tgt_match,
-                    item_param_map=item_param_map,
-                    prompt_fields=prompt_fields if (enable_prompt_fields and prompt_fields) else None,
-                    join_with=join_with,
-                    prompt_param=prompt_param,
-                    max_items=max_items,
-                    strict=strict,
-                )
-                if not related_items:
-                    if strict:
-                        raise RuntimeError(
-                            "relationPrompt 未匹配到任何关联记录：请检查表A的选择值/record_id 是否能在表B中找到，以及 itemParamMap 的字段名是否存在。"
-                        )
-                else:
-                    if enable_split:
-                        relation_split_items = related_items
-                        split_param = split_param or prompt_param
+        try:
+            record_field_map = raw_cfg.get("recordFields") or {}
+            # 支持 relationPrompts（数组，多张）或 relationPrompt（单个，向后兼容）
+            relation_prompts = raw_cfg.get("relationPrompts") or raw_cfg.get("relation_prompts")
+            relation_prompt = raw_cfg.get("relationPrompt") or raw_cfg.get("relation_prompt")
+            # 统一处理为数组
+            if isinstance(relation_prompts, list):
+                rp_list = relation_prompts
+            elif isinstance(relation_prompt, dict):
+                rp_list = [relation_prompt]
+            else:
+                rp_list = []
+            
+            # 处理每个关联配置
+            split_groups = []  # 每个启用 split 的关联表的 items 列表，用于笛卡尔积
+            non_split_updates = {}  # 不 split 的关联表的合并更新
+            
+            for rp in rp_list:
+                if not isinstance(rp, dict):
+                    continue
+                src_field = rp.get("sourceField") or rp.get("source_field")
+                src_field = str(src_field).strip() if isinstance(src_field, str) and str(src_field).strip() else None
+                prompt_param = rp.get("targetParam") or rp.get("target_param") or "prompt"
+                prompt_param = str(prompt_param).strip() if isinstance(prompt_param, str) and str(prompt_param).strip() else "prompt"
+                tgt_key = rp.get("targetTableKey") or rp.get("target_table_key")
+                tgt_key = str(tgt_key).strip() if isinstance(tgt_key, str) and str(tgt_key).strip() else None
+                tgt_app = rp.get("targetAppToken") or rp.get("target_app_token") or rp.get("app_token")
+                tgt_app = str(tgt_app).strip() if isinstance(tgt_app, str) and str(tgt_app).strip() else None
+                tgt_tid = rp.get("targetTableId") or rp.get("target_table_id") or rp.get("table_id")
+                tgt_tid = str(tgt_tid).strip() if isinstance(tgt_tid, str) and str(tgt_tid).strip() else None
+                tgt_match = rp.get("targetMatchField") or rp.get("target_match_field")
+                tgt_match = str(tgt_match).strip() if isinstance(tgt_match, str) and str(tgt_match).strip() else None
+                ipm_raw = rp.get("itemParamMap") or rp.get("item_param_map") or rp.get("item_params") or {}
+                item_param_map: dict[str, str] = {}
+                if isinstance(ipm_raw, dict):
+                    for k, v in ipm_raw.items():
+                        kk = str(k or "").strip()
+                        vv = str(v or "").strip()
+                        if kk and vv:
+                            item_param_map[kk] = vv
+                pf = rp.get("promptFields") or rp.get("prompt_fields") or []
+                prompt_fields: list[str] = []
+                if isinstance(pf, list):
+                    for x in pf:
+                        if isinstance(x, str) and x.strip():
+                            prompt_fields.append(x.strip())
+                elif isinstance(pf, str) and pf.strip():
+                    prompt_fields = [pf.strip()]
+                join_with = rp.get("joinWith") or rp.get("join_with") or "\n"
+                join_with = str(join_with) if isinstance(join_with, str) else "\n"
+                max_items = rp.get("maxItems") or rp.get("max_items") or 20
+                max_items = int(max_items) if isinstance(max_items, int) else (int(str(max_items)) if str(max_items).strip().isdigit() else 20)
+                max_items = max(1, min(100, max_items))
+                enable_split = rp.get("split")
+                enable_split = True if enable_split is None else bool(enable_split)
+                strict = rp.get("strict")
+                strict = True if strict is None else bool(strict)
+                enable_item_param_map = rp.get("enableItemParamMap") if isinstance(rp.get("enableItemParamMap"), bool) else rp.get("enable_item_param_map")
+                enable_item_param_map = True if enable_item_param_map is None else bool(enable_item_param_map)
+                enable_prompt_fields = rp.get("enablePromptFields") if isinstance(rp.get("enablePromptFields"), bool) else rp.get("enable_prompt_fields")
+                enable_prompt_fields = True if enable_prompt_fields is None else bool(enable_prompt_fields)
+                has_item_targets = enable_item_param_map and bool(item_param_map) and any((k in wf.params) for k in item_param_map.keys())
+                
+                if src_field and has_item_targets:
+                    src_val = record_fields.get(src_field)
+                    related_items = await _resolve_relation_param_items(
+                        ctx,
+                        source_value=src_val,
+                        target_app_token=tgt_app,
+                        target_table_id=tgt_tid,
+                        target_table_key=tgt_key,
+                        target_match_field=tgt_match,
+                        item_param_map=item_param_map,
+                        prompt_fields=prompt_fields if (enable_prompt_fields and prompt_fields) else None,
+                        join_with=join_with,
+                        prompt_param=prompt_param,
+                        max_items=max_items,
+                        strict=strict,
+                    )
+                    if not related_items:
+                        if strict:
+                            raise RuntimeError(
+                                "relationPrompt 未匹配到任何关联记录：请检查表A的选择值/record_id 是否能在表B中找到，以及 itemParamMap 的字段名是否存在。"
+                            )
                     else:
-                        merged.update(related_items[0])
-            elif src_field and enable_prompt_fields and prompt_fields:
-                src_val = record_fields.get(src_field)
-                related_prompts = await _resolve_relation_prompts(
-                    ctx,
-                    source_value=src_val,
-                    target_app_token=tgt_app,
-                    target_table_id=tgt_tid,
-                    target_table_key=tgt_key,
-                    target_match_field=tgt_match,
-                    prompt_fields=prompt_fields,
-                    join_with=join_with,
-                    max_items=max_items,
-                    strict=strict,
-                )
-                if not related_prompts:
-                    if strict:
-                        raise RuntimeError(
-                            "relationPrompt 未匹配到任何关联提示词：请检查表A的“选择屏数”值是否能在表B的匹配列中找到（例如匹配列=屏类型），以及表B是否存在要拼接的字段（通用总控提示词/专用生图提示词）。"
-                        )
-                else:
-                    merged[prompt_param] = related_prompts
-                    if enable_split:
-                        split_param = split_param or prompt_param
-            elif src_field and enable_item_param_map and item_param_map and not has_item_targets and strict and not (enable_prompt_fields and prompt_fields):
-                raise RuntimeError("relationPrompt 配置了 itemParamMap，但工作流 params 里没有对应的参数映射：请先在 params 中新增这些参数并配置 targets，或改用 promptFields 拼接。")
+                        if enable_split:
+                            split_groups.append((prompt_param, related_items))
+                        else:
+                            non_split_updates.update(related_items[0])
+                elif src_field and enable_prompt_fields and prompt_fields:
+                    src_val = record_fields.get(src_field)
+                    related_prompts = await _resolve_relation_prompts(
+                        ctx,
+                        source_value=src_val,
+                        target_app_token=tgt_app,
+                        target_table_id=tgt_tid,
+                        target_table_key=tgt_key,
+                        target_match_field=tgt_match,
+                        prompt_fields=prompt_fields,
+                        join_with=join_with,
+                        max_items=max_items,
+                        strict=strict,
+                    )
+                    if not related_prompts:
+                        if strict:
+                            raise RuntimeError(
+                                "relationPrompt 未匹配到任何关联提示词：请检查表A的“选择屏数”值是否能在表B的匹配列中找到（例如匹配列=屏类型），以及表B是否存在要拼接的字段（通用总控提示词/专用生图提示词）。"
+                            )
+                    else:
+                        if enable_split:
+                            # 对于 promptFields 方式的 split，创建简单的字典列表
+                            split_items = [{prompt_param: p} for p in related_prompts]
+                            split_groups.append((prompt_param, split_items))
+                        else:
+                            non_split_updates[prompt_param] = related_prompts
+                elif src_field and enable_item_param_map and item_param_map and not has_item_targets and strict and not (enable_prompt_fields and prompt_fields):
+                    raise RuntimeError("relationPrompt 配置了 itemParamMap，但工作流 params 里没有对应的参数映射：请先在 params 中新增这些参数并配置 targets，或改用 promptFields 拼接。")
+            
+            # 应用非 split 的更新
+            merged.update(non_split_updates)
+            
+            # 处理 split 的笛卡尔积
+            if split_groups:
+                # 生成笛卡尔积
+                cartesian_items = _cartesian_product(split_groups)
+                # 取最后一个作为 split_param（保持向后兼容的行为）
+                split_param = split_groups[-1][0] if split_groups else None
+                # 限制最大数量
+                split_max = 50
+                relation_split_items = cartesian_items[:split_max]
+        except Exception as e:
+            # 处理关联表失败时，更新状态为失败
+            err_msg = f"处理关联表失败: {str(e)}"
+            if record_id and not record_id.startswith("mock_rec_") and bitable and table_cfg and bitable.mode.write_enabled:
+                wf_fields0 = cfg_for_wf.get("writeBackFields") if isinstance(cfg_for_wf, dict) else None
+                allow_write_error0 = True if not isinstance(wf_fields0, dict) else ("error" in wf_fields0)
+                error_field = table_cfg.fields.get("error")
+                status_field = table_cfg.fields.get("status")
+                failed_value = table_cfg.status_values.get("failed")
+                updates: dict[str, Any] = {}
+                if allow_write_error0 and error_field:
+                    updates[error_field] = err_msg
+                if status_field and failed_value:
+                    updates[status_field] = failed_value
+                if updates:
+                    try:
+                        await bitable.update_record(record_id, updates)
+                    except Exception:
+                        pass
+            raise RuntimeError(err_msg)
         for param_key in wf.params.keys():
             field_name = record_field_map.get(param_key) or param_key
             if field_name in record_fields:
@@ -1626,11 +1717,30 @@ async def run_workflow(
                     except Exception:
                         pass
             else:
+                logging.info(
+                    "comfyui submit start: workflow_key=%s workflow_name=%s record_id=%s subtask=%s/%s api_workflow_path=%r node_count=%s",
+                    workflow_key,
+                    getattr(wf, "workflow_name", workflow_key),
+                    record_id,
+                    idx + 1,
+                    len(runs),
+                    api_workflow_path,
+                    len(node_info_list),
+                )
                 prompt_id = await queue_by_workflowprompt(
                     comfyui_client,
                     wf=wf,
                     node_info_list=node_info_list,
                     extra_data=extra_data,
+                )
+                logging.info(
+                    "comfyui submit done: workflow_key=%s workflow_name=%s record_id=%s subtask=%s/%s prompt_id=%r",
+                    workflow_key,
+                    getattr(wf, "workflow_name", workflow_key),
+                    record_id,
+                    idx + 1,
+                    len(runs),
+                    prompt_id,
                 )
                 if not prompt_id and not err_msg:
                     err_msg = "ComfyUI 提交任务成功但未返回 prompt_id，无法跟踪任务状态"
@@ -1780,6 +1890,16 @@ async def run_workflow(
         body_short = body_text.strip()
         if len(body_short) > 800:
             body_short = body_short[:800] + "..."
+        logging.warning(
+            "comfyui submit http error: workflow_key=%s workflow_name=%s record_id=%s status=%s api_workflow_path=%r prompt_ids_submitted=%s response=%s",
+            workflow_key,
+            getattr(wf, "workflow_name", workflow_key),
+            record_id,
+            status,
+            api_workflow_path,
+            len(prompt_ids),
+            body_short,
+        )
         # 将请求参数写入 temp 目录，方便排查
         try:
             save_dir = ctx.settings.temp_download_dir
@@ -1794,7 +1914,7 @@ async def run_workflow(
             if provider != "runninghub":
                 dump["node_info_list"] = node_info_list
                 dump["extra_data"] = extra_data
-                api_path = getattr(wf, "api_workflow_path", None)
+                api_path = api_workflow_path
                 if api_path:
                     dump["api_workflow_path"] = api_path
                     try:
@@ -1821,22 +1941,43 @@ async def run_workflow(
                     body_text=body_text,
                 )
                 logging.warning(
-                    "workflowprompt failed: workflow=%s status=%s allow_fallback=%s response=%s",
+                    "workflowprompt failed: workflow=%s status=%s allow_fallback=%s api_workflow_path=%r response=%s",
                     getattr(wf, "workflow_name", workflow_key),
                     status,
                     allow_fallback,
+                    api_workflow_path,
                     body_short,
                 )
                 if not allow_fallback:
+                    logging.warning(
+                        "workflowprompt fallback skipped: reason=allow_fallback_false workflow_key=%s workflow_name=%s record_id=%s",
+                        workflow_key,
+                        getattr(wf, "workflow_name", workflow_key),
+                        record_id,
+                    )
                     err_msg = user_msg
-                elif not wf.api_workflow_path:
+                elif not api_workflow_path:
+                    logging.warning(
+                        "workflowprompt fallback skipped: reason=missing_api_workflow_path workflow_key=%s workflow_name=%s record_id=%s",
+                        workflow_key,
+                        getattr(wf, "workflow_name", workflow_key),
+                        record_id,
+                    )
                     err_msg = (
                         user_msg
                         + "\n但当前 workflow 没有配置 `apiWorkflowPath`，所以无法继续降级执行。"
                     )
                 else:
+                    logging.warning(
+                        "workflowprompt fallback start: workflow_key=%s workflow_name=%s record_id=%s api_workflow_path=%r node_count=%s",
+                        workflow_key,
+                        getattr(wf, "workflow_name", workflow_key),
+                        record_id,
+                        api_workflow_path,
+                        len(node_info_list),
+                    )
                     try:
-                        prompt = json.loads(Path(wf.api_workflow_path).read_text(encoding="utf-8"))
+                        prompt = json.loads(Path(api_workflow_path).read_text(encoding="utf-8"))
                         if isinstance(prompt, dict):
                             for it in node_info_list:
                                 node_id = str(it.get("nodeId") or "")
@@ -1852,8 +1993,24 @@ async def run_workflow(
                                 inputs[field_name] = it.get("fieldValue")
                         res = await comfyui_client.queue_api_prompt(prompt=prompt, extra_data=extra_data)
                         prompt_id = res.prompt_id
+                        logging.warning(
+                            "workflowprompt fallback done: workflow_key=%s workflow_name=%s record_id=%s api_workflow_path=%r prompt_id=%r",
+                            workflow_key,
+                            getattr(wf, "workflow_name", workflow_key),
+                            record_id,
+                            api_workflow_path,
+                            prompt_id,
+                        )
                         err_msg = None
                     except Exception as e2:
+                        logging.warning(
+                            "workflowprompt fallback failed: workflow_key=%s workflow_name=%s record_id=%s api_workflow_path=%r err=%s",
+                            workflow_key,
+                            getattr(wf, "workflow_name", workflow_key),
+                            record_id,
+                            api_workflow_path,
+                            str(e2),
+                        )
                         err_msg = (
                             user_msg
                             + f"\n随后尝试 `apiWorkflowPath` 降级执行也失败了：{e2}"
@@ -2044,24 +2201,53 @@ async def preview_workflow_runs(
         merged.update(raw_defaults)
 
     split_param: str | None = None
+    # 辅助函数：计算多个列表的笛卡尔积
+    def _cartesian_product(lists):
+        if not lists:
+            return [{}]
+        result = [{}]
+        for key, items in lists:
+            new_result = []
+            for d in result:
+                for item in items:
+                    new_d = dict(d)
+                    new_d.update(item)
+                    new_result.append(new_d)
+            result = new_result
+        return result
     if use_record_fields:
         record_field_map = raw_cfg.get("recordFields") or {}
-
+        # 支持 relationPrompts（数组，多张）或 relationPrompt（单个，向后兼容）
+        relation_prompts = raw_cfg.get("relationPrompts") or raw_cfg.get("relation_prompts")
         relation_prompt = raw_cfg.get("relationPrompt") or raw_cfg.get("relation_prompt")
-        if isinstance(relation_prompt, dict):
-            src_field = relation_prompt.get("sourceField") or relation_prompt.get("source_field")
+        # 统一处理为数组
+        if isinstance(relation_prompts, list):
+            rp_list = relation_prompts
+        elif isinstance(relation_prompt, dict):
+            rp_list = [relation_prompt]
+        else:
+            rp_list = []
+        
+        # 处理每个关联配置
+        split_groups = []  # 每个启用 split 的关联表的 items 列表，用于笛卡尔积
+        non_split_updates = {}  # 不 split 的关联表的合并更新
+        
+        for rp in rp_list:
+            if not isinstance(rp, dict):
+                continue
+            src_field = rp.get("sourceField") or rp.get("source_field")
             src_field = str(src_field).strip() if isinstance(src_field, str) and str(src_field).strip() else None
-            prompt_param = relation_prompt.get("targetParam") or relation_prompt.get("target_param") or "prompt"
+            prompt_param = rp.get("targetParam") or rp.get("target_param") or "prompt"
             prompt_param = str(prompt_param).strip() if isinstance(prompt_param, str) and str(prompt_param).strip() else "prompt"
-            tgt_key = relation_prompt.get("targetTableKey") or relation_prompt.get("target_table_key")
+            tgt_key = rp.get("targetTableKey") or rp.get("target_table_key")
             tgt_key = str(tgt_key).strip() if isinstance(tgt_key, str) and str(tgt_key).strip() else None
-            tgt_app = relation_prompt.get("targetAppToken") or relation_prompt.get("target_app_token") or relation_prompt.get("app_token")
+            tgt_app = rp.get("targetAppToken") or rp.get("target_app_token") or rp.get("app_token")
             tgt_app = str(tgt_app).strip() if isinstance(tgt_app, str) and str(tgt_app).strip() else None
-            tgt_tid = relation_prompt.get("targetTableId") or relation_prompt.get("target_table_id") or relation_prompt.get("table_id")
+            tgt_tid = rp.get("targetTableId") or rp.get("target_table_id") or rp.get("table_id")
             tgt_tid = str(tgt_tid).strip() if isinstance(tgt_tid, str) and str(tgt_tid).strip() else None
-            tgt_match = relation_prompt.get("targetMatchField") or relation_prompt.get("target_match_field")
+            tgt_match = rp.get("targetMatchField") or rp.get("target_match_field")
             tgt_match = str(tgt_match).strip() if isinstance(tgt_match, str) and str(tgt_match).strip() else None
-            ipm_raw = relation_prompt.get("itemParamMap") or relation_prompt.get("item_param_map") or relation_prompt.get("item_params") or {}
+            ipm_raw = rp.get("itemParamMap") or rp.get("item_param_map") or rp.get("item_params") or {}
             item_param_map: dict[str, str] = {}
             if isinstance(ipm_raw, dict):
                 for k, v in ipm_raw.items():
@@ -2069,7 +2255,7 @@ async def preview_workflow_runs(
                     vv = str(v or "").strip()
                     if kk and vv:
                         item_param_map[kk] = vv
-            pf = relation_prompt.get("promptFields") or relation_prompt.get("prompt_fields") or []
+            pf = rp.get("promptFields") or rp.get("prompt_fields") or []
             prompt_fields: list[str] = []
             if isinstance(pf, list):
                 for x in pf:
@@ -2077,20 +2263,21 @@ async def preview_workflow_runs(
                         prompt_fields.append(x.strip())
             elif isinstance(pf, str) and pf.strip():
                 prompt_fields = [pf.strip()]
-            join_with = relation_prompt.get("joinWith") or relation_prompt.get("join_with") or "\n"
+            join_with = rp.get("joinWith") or rp.get("join_with") or "\n"
             join_with = str(join_with) if isinstance(join_with, str) else "\n"
-            max_items = relation_prompt.get("maxItems") or relation_prompt.get("max_items") or 20
+            max_items = rp.get("maxItems") or rp.get("max_items") or 20
             max_items = int(max_items) if isinstance(max_items, int) else (int(str(max_items)) if str(max_items).strip().isdigit() else 20)
             max_items = max(1, min(100, max_items))
-            enable_split = relation_prompt.get("split")
+            enable_split = rp.get("split")
             enable_split = True if enable_split is None else bool(enable_split)
-            strict = relation_prompt.get("strict")
+            strict = rp.get("strict")
             strict = True if strict is None else bool(strict)
-            enable_item_param_map = relation_prompt.get("enableItemParamMap") if isinstance(relation_prompt.get("enableItemParamMap"), bool) else relation_prompt.get("enable_item_param_map")
+            enable_item_param_map = rp.get("enableItemParamMap") if isinstance(rp.get("enableItemParamMap"), bool) else rp.get("enable_item_param_map")
             enable_item_param_map = True if enable_item_param_map is None else bool(enable_item_param_map)
-            enable_prompt_fields = relation_prompt.get("enablePromptFields") if isinstance(relation_prompt.get("enablePromptFields"), bool) else relation_prompt.get("enable_prompt_fields")
+            enable_prompt_fields = rp.get("enablePromptFields") if isinstance(rp.get("enablePromptFields"), bool) else rp.get("enable_prompt_fields")
             enable_prompt_fields = True if enable_prompt_fields is None else bool(enable_prompt_fields)
             has_item_targets = enable_item_param_map and bool(item_param_map) and any((k in wf.params) for k in item_param_map.keys())
+            
             if src_field and has_item_targets:
                 src_val = record_fields.get(src_field)
                 related_items = await _resolve_relation_param_items(
@@ -2112,10 +2299,9 @@ async def preview_workflow_runs(
                         raise RuntimeError("relationPrompt 未匹配到任何关联记录：请检查表A的选择值/record_id 是否能在表B中找到，以及 itemParamMap 的字段名是否存在。")
                 else:
                     if enable_split:
-                        relation_split_items = related_items
-                        split_param = split_param or prompt_param
+                        split_groups.append((prompt_param, related_items))
                     else:
-                        merged.update(related_items[0])
+                        non_split_updates.update(related_items[0])
             elif src_field and enable_prompt_fields and prompt_fields:
                 src_val = record_fields.get(src_field)
                 related_prompts = await _resolve_relation_prompts(
@@ -2136,11 +2322,27 @@ async def preview_workflow_runs(
                             "relationPrompt 未匹配到任何关联提示词：请检查表A的关联字段值是否能在表B的匹配列中找到，以及表B是否存在要拼接的字段。"
                         )
                 else:
-                    merged[prompt_param] = related_prompts
                     if enable_split:
-                        split_param = split_param or prompt_param
+                        # 对于 promptFields 方式的 split，创建简单的字典列表
+                        split_items = [{prompt_param: p} for p in related_prompts]
+                        split_groups.append((prompt_param, split_items))
+                    else:
+                        non_split_updates[prompt_param] = related_prompts
             elif src_field and enable_item_param_map and item_param_map and not has_item_targets and strict and not (enable_prompt_fields and prompt_fields):
                 raise RuntimeError("relationPrompt 配置了 itemParamMap，但工作流 params 里没有对应的参数映射：请先在 params 中新增这些参数并配置 targets，或改用 promptFields 拼接。")
+        
+        # 应用非 split 的更新
+        merged.update(non_split_updates)
+        
+        # 处理 split 的笛卡尔积
+        if split_groups:
+            # 生成笛卡尔积
+            cartesian_items = _cartesian_product(split_groups)
+            # 取最后一个作为 split_param（保持向后兼容的行为）
+            split_param = split_groups[-1][0] if split_groups else None
+            # 限制最大数量
+            split_max = 50
+            relation_split_items = cartesian_items[:split_max]
 
         for param_key in wf.params.keys():
             field_name = record_field_map.get(param_key) or param_key

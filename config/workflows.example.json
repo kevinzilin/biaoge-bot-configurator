@@ -190,6 +190,115 @@
       "defaults": {}
     },
 
+    "test-gpt-image-multi-relation": {
+      "_说明": "本地 ComfyUI + 多张关联表。使用 relationPrompts 数组配置多个关联表。如果多个关联表都开启 split，则会进行笛卡尔积组合拆分。例如：关联表A有2条、关联表B有3条，则总共生成 2×3=6 个子任务。",
+      "workflowName": "test-gpt-image",
+      "comfyuiBaseUrl": "http://127.0.0.1:8188",
+      "table": "gpt_test_table",
+      "runLogTable": "runlog_table",
+      "recordFields": {
+        "images": "产品图"
+      },
+      "writeBackFields": {
+        "output": "结果图",
+        "status": "任务状态",
+        "error": "错误信息",
+        "prompt_id": "任务ID"
+      },
+      "relationPrompts": [
+        {
+          "_说明": "第一个关联表：屏幕配置（不拆分，仅合并参数）",
+          "sourceField": "选择屏数",
+          "targetParam": "prompt",
+          "split": false,
+          "maxItems": 20,
+          "joinWith": "\n",
+          "strict": true,
+          "enableItemParamMap": true,
+          "enablePromptFields": false,
+          "targetAppToken": "${BITABLE_APP_TOKEN_GPT}",
+          "targetTableId": "${BITABLE_TABLE_ID_SCREENS}",
+          "targetMatchField": "类型",
+          "itemParamMap": {
+            "prompt_general": "通用总控提示词",
+            "prompt_special": "专用生图提示词"
+          }
+        },
+        {
+          "_说明": "第二个关联表：风格配置（拆分，按风格生成多张）",
+          "sourceField": "选择风格",
+          "targetParam": "style_prompt",
+          "split": true,
+          "maxItems": 20,
+          "joinWith": "\n",
+          "strict": true,
+          "enableItemParamMap": true,
+          "enablePromptFields": false,
+          "targetAppToken": "${BITABLE_APP_TOKEN_GPT}",
+          "targetTableId": "${BITABLE_TABLE_ID_STYLES}",
+          "targetMatchField": "风格名称",
+          "itemParamMap": {
+            "style_param": "风格参数"
+          }
+        },
+        {
+          "_说明": "第三个关联表：角度配置（也拆分，与风格进行笛卡尔积组合）",
+          "sourceField": "选择角度",
+          "targetParam": "angle_prompt",
+          "split": true,
+          "maxItems": 20,
+          "joinWith": "\n",
+          "strict": true,
+          "enableItemParamMap": true,
+          "enablePromptFields": false,
+          "targetAppToken": "${BITABLE_APP_TOKEN_GPT}",
+          "targetTableId": "${BITABLE_TABLE_ID_ANGLES}",
+          "targetMatchField": "角度名称",
+          "itemParamMap": {
+            "angle_param": "角度参数"
+          }
+        }
+      ],
+      "params": {
+        "prompt": {
+          "targets": [
+            { "nodeId": "10", "fieldName": "positive" }
+          ],
+          "type": "str"
+        },
+        "images": {
+          "targets": [
+            { "nodeId": "5", "fieldName": "image", "index": 0 }
+          ],
+          "type": "str"
+        },
+        "prompt_general": {
+          "targets": [
+            { "nodeId": "8", "fieldName": "positive" }
+          ]
+        },
+        "prompt_special": {
+          "type": "str",
+          "targets": [
+            { "nodeId": "9", "fieldName": "positive" }
+          ]
+        },
+        "style_param": {
+          "type": "str",
+          "targets": [
+            { "nodeId": "12", "fieldName": "positive" }
+          ]
+        },
+        "angle_param": {
+          "type": "str",
+          "targets": [
+            { "nodeId": "15", "fieldName": "positive" }
+          ]
+        }
+      },
+      "defaults": {}
+    },
+
     "test-gpt-image-runninghub": {
       "_说明": "RunningHub 远程平台。provider=runninghub 时走 RunningHub API 提交任务，支持 webhook 回调或本地轮询获取结果。",
       "provider": "runninghub",

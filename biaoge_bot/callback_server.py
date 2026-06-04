@@ -1325,9 +1325,15 @@ def create_callback_app(ctx: AppContext) -> FastAPI:
         raw_cfg = (ctx.config.get("workflows") or {}).get(wk) or {}
         if not isinstance(raw_cfg, dict):
             return {"ok": False, "error": "workflow config not found"}
+        # 支持 relationPrompts（数组，多张）或 relationPrompt（单个，向后兼容）
+        relation_prompts = raw_cfg.get("relationPrompts") or raw_cfg.get("relation_prompts")
         relation_prompt = raw_cfg.get("relationPrompt") or raw_cfg.get("relation_prompt")
-        if not isinstance(relation_prompt, dict):
-            return {"ok": False, "error": "workflow missing relationPrompt"}
+        if isinstance(relation_prompts, list):
+            rp_list = relation_prompts
+        elif isinstance(relation_prompt, dict):
+            rp_list = [relation_prompt]
+        else:
+            return {"ok": False, "error": "workflow missing relationPrompt or relationPrompts"}
 
         resolved_table_key = str(table or raw_cfg.get("table") or ctx.default_table_key or "").strip()
         bitable = ctx.bitables.get(resolved_table_key) if resolved_table_key else None
@@ -1340,64 +1346,71 @@ def create_callback_app(ctx: AppContext) -> FastAPI:
             return {"ok": False, "error": str(e)}
         fields0 = rec.get("fields") if isinstance(rec, dict) and isinstance(rec.get("fields"), dict) else {}
 
-        src_field = relation_prompt.get("sourceField") or relation_prompt.get("source_field")
-        src_field = str(src_field).strip() if isinstance(src_field, str) and str(src_field).strip() else ""
-        if not src_field:
-            return {"ok": False, "error": "relationPrompt missing sourceField"}
-        src_val = fields0.get(src_field)
+        all_results = []
+        for idx, rp in enumerate(rp_list):
+            if not isinstance(rp, dict):
+                continue
+            src_field = rp.get("sourceField") or rp.get("source_field")
+            src_field = str(src_field).strip() if isinstance(src_field, str) and str(src_field).strip() else ""
+            if not src_field:
+                all_results.append({"index": idx, "error": "relationPrompt missing sourceField"})
+                continue
+            src_val = fields0.get(src_field)
 
-        tgt_key = relation_prompt.get("targetTableKey") or relation_prompt.get("target_table_key")
-        tgt_key = str(tgt_key).strip() if isinstance(tgt_key, str) and str(tgt_key).strip() else None
-        tgt_app = relation_prompt.get("targetAppToken") or relation_prompt.get("target_app_token") or relation_prompt.get("app_token")
-        tgt_app = str(tgt_app).strip() if isinstance(tgt_app, str) and str(tgt_app).strip() else None
-        tgt_tid = relation_prompt.get("targetTableId") or relation_prompt.get("target_table_id") or relation_prompt.get("table_id")
-        tgt_tid = str(tgt_tid).strip() if isinstance(tgt_tid, str) and str(tgt_tid).strip() else None
-        tgt_match = relation_prompt.get("targetMatchField") or relation_prompt.get("target_match_field")
-        tgt_match = str(tgt_match).strip() if isinstance(tgt_match, str) and str(tgt_match).strip() else None
+            tgt_key = rp.get("targetTableKey") or rp.get("target_table_key")
+            tgt_key = str(tgt_key).strip() if isinstance(tgt_key, str) and str(tgt_key).strip() else None
+            tgt_app = rp.get("targetAppToken") or rp.get("target_app_token") or rp.get("app_token")
+            tgt_app = str(tgt_app).strip() if isinstance(tgt_app, str) and str(tgt_app).strip() else None
+            tgt_tid = rp.get("targetTableId") or rp.get("target_table_id") or rp.get("table_id")
+            tgt_tid = str(tgt_tid).strip() if isinstance(tgt_tid, str) and str(tgt_tid).strip() else None
+            tgt_match = rp.get("targetMatchField") or rp.get("target_match_field")
+            tgt_match = str(tgt_match).strip() if isinstance(tgt_match, str) and str(tgt_match).strip() else None
 
-        pf = relation_prompt.get("promptFields") or relation_prompt.get("prompt_fields") or []
-        prompt_fields: list[str] = []
-        if isinstance(pf, list):
-            for x in pf:
-                if isinstance(x, str) and x.strip():
-                    prompt_fields.append(x.strip())
-        elif isinstance(pf, str) and pf.strip():
-            prompt_fields = [pf.strip()]
-        if not prompt_fields:
-            return {"ok": False, "error": "relationPrompt missing promptFields"}
+            pf = rp.get("promptFields") or rp.get("prompt_fields") or []
+            prompt_fields: list[str] = []
+            if isinstance(pf, list):
+                for x in pf:
+                    if isinstance(x, str) and x.strip():
+                        prompt_fields.append(x.strip())
+            elif isinstance(pf, str) and pf.strip():
+                prompt_fields = [pf.strip()]
 
-        join_with = relation_prompt.get("joinWith") or relation_prompt.get("join_with") or "\n"
-        join_with = str(join_with) if isinstance(join_with, str) else "\n"
-        max_items = relation_prompt.get("maxItems") or relation_prompt.get("max_items") or 20
-        max_items = int(max_items) if isinstance(max_items, int) else (int(str(max_items)) if str(max_items).strip().isdigit() else 20)
-        max_items = max(1, min(100, max_items))
-        strict = relation_prompt.get("strict")
-        strict = True if strict is None else bool(strict)
+            join_with = rp.get("joinWith") or rp.get("join_with") or "\n"
+            join_with = str(join_with) if isinstance(join_with, str) else "\n"
+            max_items = rp.get("maxItems") or rp.get("max_items") or 20
+            max_items = int(max_items) if isinstance(max_items, int) else (int(str(max_items)) if str(max_items).strip().isdigit() else 20)
+            max_items = max(1, min(100, max_items))
+            strict = rp.get("strict")
+            strict = True if strict is None else bool(strict)
 
-        try:
-            prompts = await _enc_resolve_relation_prompts(
-                ctx,
-                source_value=src_val,
-                target_app_token=tgt_app,
-                target_table_id=tgt_tid,
-                target_table_key=tgt_key,
-                target_match_field=tgt_match,
-                prompt_fields=prompt_fields,
-                join_with=join_with,
-                max_items=max_items,
-                strict=strict,
-            )
-        except Exception as e:
-            return {"ok": False, "error": str(e)}
+            try:
+                prompts = await _enc_resolve_relation_prompts(
+                    ctx,
+                    source_value=src_val,
+                    target_app_token=tgt_app,
+                    target_table_id=tgt_tid,
+                    target_table_key=tgt_key,
+                    target_match_field=tgt_match,
+                    prompt_fields=prompt_fields,
+                    join_with=join_with,
+                    max_items=max_items,
+                    strict=strict,
+                )
+                all_results.append({
+                    "index": idx,
+                    "source": {"field": src_field, "raw": src_val, "display": _collect_display_strings(src_val)},
+                    "target": {"table_key": tgt_key, "table_id": tgt_tid, "match_field": tgt_match, "prompt_fields": prompt_fields, "join_with": join_with},
+                    "resolved": {"count": len(prompts), "items": prompts},
+                })
+            except Exception as e:
+                all_results.append({"index": idx, "error": str(e)})
 
         return {
             "ok": True,
             "workflow": wk,
             "table": resolved_table_key,
             "record_id": rid,
-            "source": {"field": src_field, "raw": src_val, "display": _collect_display_strings(src_val)},
-            "target": {"table_key": tgt_key, "table_id": tgt_tid, "match_field": tgt_match, "prompt_fields": prompt_fields, "join_with": join_with},
-            "resolved": {"count": len(prompts), "items": prompts},
+            "results": all_results,
         }
 
     @app.get("/_local/workflow/preview")

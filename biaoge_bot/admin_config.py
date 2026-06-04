@@ -827,9 +827,165 @@ _PAGE_HTML = r"""
       return out;
     };
     return wrap;
-  }
+    }
 
-  function applyBitableMode() {
+    function relationPromptsEditor(initialPrompts) {
+      const wrap = el("div", {class:"kvWrap"});
+      const list = el("div", {class:"kvWrap"});
+
+      function addPromptItem(promptSpec) {
+        const orig = promptSpec && typeof promptSpec === "object" ? promptSpec : {};
+        const card = el("div", {class:"card paramCard", style:"padding:12px"});
+        const head = el("div", {class:"sectionHeader"}, [
+          el("span", {class:"pill", text:"关联表"}),
+          el("div", {style:"flex:1; font-weight:600; color:rgba(229,231,235,0.92);"}),
+          el("button", {type:"button", text:"删除", class:"btnDanger"})
+        ]);
+        const delBtn = head.querySelector("button");
+        delBtn.onclick = () => card.remove();
+
+        const sourceField = el("input", {type:"text", value: String(orig.sourceField || orig.source_field || ""), placeholder:"表A字段名(如 选择屏数)"});
+        const targetParam = el("input", {type:"text", value: String(orig.targetParam || orig.target_param || "prompt"), placeholder:"目标参数名(如 prompt)"});
+        const split = el("input", {type:"checkbox", class:"switch"});
+        split.checked = (orig.split == null) ? true : !!orig.split;
+        const strict = el("input", {type:"checkbox", class:"switch"});
+        strict.checked = (orig.strict == null) ? true : !!orig.strict;
+        const enableItemParamMap = el("input", {type:"checkbox", class:"switch"});
+        enableItemParamMap.checked = (orig.enableItemParamMap == null && orig.enable_item_param_map == null) ? true : !!(orig.enableItemParamMap ?? orig.enable_item_param_map);
+        const enablePromptFields = el("input", {type:"checkbox", class:"switch"});
+        enablePromptFields.checked = (orig.enablePromptFields == null && orig.enable_prompt_fields == null) ? true : !!(orig.enablePromptFields ?? orig.enable_prompt_fields);
+        const maxItems = el("input", {type:"text", value: (orig.maxItems != null) ? String(orig.maxItems) : ((orig.max_items != null) ? String(orig.max_items) : ""), placeholder:"20"});
+        const targetTableKey = el("input", {type:"text", value: String(orig.targetTableKey || orig.target_table_key || ""), placeholder:"目标表key"});
+        const targetMatchField = el("input", {type:"text", value: String(orig.targetMatchField || orig.target_match_field || ""), placeholder:"匹配字段名(如 类型)"});
+        const targetAppToken = el("input", {type:"text", value: String(orig.targetAppToken || orig.target_app_token || orig.app_token || ""), placeholder:"app_token(可选)"});
+        const targetTableId = el("input", {type:"text", value: String(orig.targetTableId || orig.target_table_id || orig.table_id || ""), placeholder:"table_id(可选)"});
+        const joinWith = el("input", {type:"text", value: String(orig.joinWith || orig.join_with || "\\n"), placeholder:"\\n"});
+
+        const ipm = orig.itemParamMap || orig.item_param_map || orig.item_params || {};
+        const itemParamMap = kvEditor(ipm, "param(如 prompt_general)", "字段名(如 通用总控提示词)");
+        const pf = orig.promptFields || orig.prompt_fields || [];
+        const promptFields = listEditor(pf, "字段名(如 通用总控提示词)");
+
+        const form = el("div", {class:"form"}, [
+          el("div", {class:"row2"}, [
+            el("div", {class:"field"}, [el("div", {class:"label", text:"sourceField"}), sourceField, el("div", {class:"help", text:"表A字段名，支持record_id或文字匹配。"})]),
+            el("div", {class:"field"}, [el("div", {class:"label", text:"maxItems"}), maxItems, el("div", {class:"help", text:"最多处理多少条关联。"})])
+          ]),
+          el("div", {class:"row2"}, [
+            el("div", {class:"field"}, [el("div", {class:"label", text:"split"}), split, el("div", {class:"help", text:"关联到几条就提交几次。"})]),
+            el("div", {class:"field"}, [el("div", {class:"label", text:"strict"}), strict, el("div", {class:"help", text:"匹配不到时直接报错。"})])
+          ]),
+          el("div", {class:"row2"}, [
+            el("div", {class:"field"}, [el("div", {class:"label", text:"targetTableKey（推荐）"}), targetTableKey, el("div", {class:"help", text:"目标表在tables里的key。"})]),
+            el("div", {class:"field"}, [el("div", {class:"label", text:"targetMatchField（可选）"}), targetMatchField, el("div", {class:"help", text:"当sourceField只有文字时的匹配字段。"})])
+          ]),
+          el("div", {class:"row2"}, [
+            el("div", {class:"field"}, [el("div", {class:"label", text:"targetAppToken（可选）"}), targetAppToken, el("div", {class:"help", text:"不使用targetTableKey时填写。"})]),
+            el("div", {class:"field"}, [el("div", {class:"label", text:"targetTableId（可选）"}), targetTableId, el("div", {class:"help", text:"不使用targetTableKey时填写。"})])
+          ]),
+          el("div", {class:"subBlock"}, [
+            el("div", {class:"subHeader"}, [el("div", {class:"subTitle", text:"itemParamMap（不拼接）"}), enableItemParamMap]),
+            el("div", {class:"relBody"}, [itemParamMap])
+          ]),
+          el("div", {class:"subBlock"}, [
+            el("div", {class:"subHeader"}, [el("div", {class:"subTitle", text:"promptFields（拼接）"}), enablePromptFields]),
+            el("div", {class:"relBody"}, [
+              el("div", {class:"row2"}, [
+                el("div", {class:"field"}, [el("div", {class:"label", text:"targetParam"}), targetParam, el("div", {class:"help", text:"拼接后的提示词写入到哪个参数。"})]),
+                el("div", {class:"field"}, [el("div", {class:"label", text:"joinWith"}), joinWith, el("div", {class:"help", text:"拼接连接符，填\\n表示换行。"})])
+              ]),
+              promptFields
+            ])
+          ])
+        ]);
+
+        card.appendChild(head);
+        card.appendChild(form);
+        list.appendChild(card);
+
+        function applyVis() {
+          const subBlocks = card.querySelectorAll(".subBlock");
+          const itemBody = subBlocks[0] ? subBlocks[0].querySelector(".relBody") : null;
+          const promptBody = subBlocks[1] ? subBlocks[1].querySelector(".relBody") : null;
+          if (itemBody) itemBody.style.display = enableItemParamMap.checked ? "" : "none";
+          if (promptBody) promptBody.style.display = enablePromptFields.checked ? "" : "none";
+        }
+        enableItemParamMap.onchange = applyVis;
+        enablePromptFields.onchange = applyVis;
+        applyVis();
+
+        card._collect = () => {
+          const sf = (sourceField.value || "").trim();
+          if (!sf) return null;
+          const rp = {};
+          rp.sourceField = sf;
+          const tp = (targetParam.value || "").trim();
+          rp.targetParam = tp || "prompt";
+          rp.split = !!split.checked;
+          rp.strict = !!strict.checked;
+          rp.enableItemParamMap = !!enableItemParamMap.checked;
+          rp.enablePromptFields = !!enablePromptFields.checked;
+          const mi = (maxItems.value || "").trim();
+          if (mi) {
+            const n = parseInt(mi, 10);
+            if (!isNaN(n)) rp.maxItems = n;
+          }
+          const jw = (joinWith.value || "").trim();
+          rp.joinWith = jw ? jw.replace(/\\n/g, "\n") : "\n";
+          const ttk = (targetTableKey.value || "").trim();
+          if (ttk) rp.targetTableKey = ttk;
+          const tam = (targetAppToken.value || "").trim();
+          if (tam) rp.targetAppToken = tam;
+          const tti = (targetTableId.value || "").trim();
+          if (tti) rp.targetTableId = tti;
+          const tmf = (targetMatchField.value || "").trim();
+          if (tmf) rp.targetMatchField = tmf;
+          const ipmVal = rp.enableItemParamMap ? itemParamMap._getValue() : {};
+          const ipmKeys = Object.keys(ipmVal || {});
+          if (ipmKeys.length) rp.itemParamMap = ipmVal;
+          const pfVal = rp.enablePromptFields ? promptFields._getValue() : [];
+          if (pfVal.length) rp.promptFields = pfVal;
+          return rp;
+        };
+      }
+
+      const init = Array.isArray(initialPrompts) ? initialPrompts : ((initialPrompts && typeof initialPrompts === "object") ? [initialPrompts] : []);
+      if (init.length) {
+        for (const p of init) addPromptItem(p);
+      } else {
+        addPromptItem({});
+      }
+
+      const addBtn = el("button", {type:"button", text:"添加关联表", class:"btnGhost"});
+      addBtn.onclick = () => addPromptItem({});
+      wrap.appendChild(el("div", {class:"help", text:"配置多张关联表，支持笛卡尔积split。"}));
+      wrap.appendChild(list);
+      wrap.appendChild(addBtn);
+
+      wrap._getValue = () => {
+        const out = [];
+        for (const card of Array.from(list.children)) {
+          const p = card._collect();
+          if (p) out.push(p);
+        }
+        return out;
+      };
+
+      wrap._setValue = (prompts) => {
+        while (list.firstChild) list.removeChild(list.firstChild);
+        const arr = Array.isArray(prompts) ? prompts : ((prompts && typeof prompts === "object") ? [prompts] : []);
+        if (arr.length) {
+          for (const p of arr) addPromptItem(p);
+        } else {
+          addPromptItem({});
+        }
+      };
+
+      return wrap;
+    }
+
+
+    function applyBitableMode() {
     const mode = String(STATE.envMeta.bitable_mode || "").trim().toLowerCase();
     const enabled = mode !== "off";
     const items = document.querySelectorAll(".bitableOnly");
@@ -1298,33 +1454,8 @@ _PAGE_HTML = r"""
       strictParamValidation.checked = false;
       const runninghubWorkflowId = el("input", {type:"text", value: (orig.runninghub && orig.runninghub.workflowId) ? String(orig.runninghub.workflowId) : ""});
 
-      const relOrig = orig.relationPrompt || orig.relation_prompt || {};
-      const relationEnabled = el("input", {type:"checkbox", class:"switch"});
-      relationEnabled.checked = !!(relOrig && typeof relOrig === "object" && Object.keys(relOrig).length);
-      const relSourceField = el("input", {type:"text", value: String(relOrig.sourceField || relOrig.source_field || "")});
-      const relTargetParam = el("input", {type:"text", value: String(relOrig.targetParam || relOrig.target_param || "prompt")});
-      const relSplit = el("input", {type:"checkbox", class:"switch"});
-      relSplit.checked = (relOrig.split == null) ? true : !!relOrig.split;
-      const relStrict = el("input", {type:"checkbox", class:"switch"});
-      relStrict.checked = (relOrig.strict == null) ? true : !!relOrig.strict;
-      const relEnableItemParamMap = el("input", {type:"checkbox", class:"switch"});
-      relEnableItemParamMap.checked = (relOrig.enableItemParamMap == null && relOrig.enable_item_param_map == null) ? true : !!(relOrig.enableItemParamMap ?? relOrig.enable_item_param_map);
-      const relEnablePromptFields = el("input", {type:"checkbox", class:"switch"});
-      relEnablePromptFields.checked = (relOrig.enablePromptFields == null && relOrig.enable_prompt_fields == null) ? true : !!(relOrig.enablePromptFields ?? relOrig.enable_prompt_fields);
-      const relMaxItems = el("input", {
-        type:"text",
-        value: (relOrig.maxItems != null) ? String(relOrig.maxItems) : ((relOrig.max_items != null) ? String(relOrig.max_items) : ""),
-        placeholder: "20",
-      });
-      const relTargetTableKey = el("input", {type:"text", value: String(relOrig.targetTableKey || relOrig.target_table_key || "")});
-      const relTargetAppToken = el("input", {type:"text", value: String(relOrig.targetAppToken || relOrig.target_app_token || relOrig.app_token || "")});
-      const relTargetTableId = el("input", {type:"text", value: String(relOrig.targetTableId || relOrig.target_table_id || relOrig.table_id || "")});
-      const relTargetMatchField = el("input", {type:"text", value: String(relOrig.targetMatchField || relOrig.target_match_field || "")});
-      const relIpm = relOrig.itemParamMap || relOrig.item_param_map || relOrig.item_params || {};
-      const relItemParamMap = kvEditor(relIpm, "param(如 prompt_general)", "字段名(如 通用总控提示词)");
-      const relPf = relOrig.promptFields || relOrig.prompt_fields || [];
-      const relPromptFields = listEditor(relPf, "字段名(如 通用总控提示词)");
-      const relJoinWith = el("input", {type:"text", value: String(relOrig.joinWith || relOrig.join_with || "\\n")});
+      const relOrig = orig.relationPrompts || orig.relation_prompts || orig.relationPrompt || orig.relation_prompt || [];
+      const relationPrompts = relationPromptsEditor(relOrig);
       const workflowTableBindingEnabled = el("input", {type:"checkbox", class:"switch"});
       const TABLE_BINDING_BACKUP_KEY = "_tableBindingBackup";
       const TB_BACKUP_LS_PREFIX = "wf_table_binding_backup::";
@@ -1365,8 +1496,8 @@ _PAGE_HTML = r"""
         if (wb && typeof wb === "object" && Object.keys(wb).length) out.writeBackFields = deepCopy(wb);
         const oni = wf0.outputNodeIds || wf0.output_node_ids || null;
         if (oni && typeof oni === "object" && Object.keys(oni).length) out.outputNodeIds = deepCopy(oni);
-        const rp = wf0.relationPrompt || wf0.relation_prompt || null;
-        if (rp && typeof rp === "object" && Object.keys(rp).length) out.relationPrompt = deepCopy(rp);
+        const rps = wf0.relationPrompts || wf0.relation_prompts || wf0.relationPrompt || wf0.relation_prompt || null;
+        if (rps && (Array.isArray(rps) || (typeof rps === "object" && Object.keys(rps).length))) out.relationPrompts = deepCopy(rps);
         const hasAny = Object.keys(out).length > 0;
         return hasAny ? out : null;
       }
@@ -1383,68 +1514,15 @@ _PAGE_HTML = r"""
         const hasObj = (o) => !!(o && typeof o === "object" && Object.keys(o).length);
         const rf = recordFields && recordFields._getValue ? recordFields._getValue() : {};
         const wf = writeBackFields && writeBackFields._getValue ? writeBackFields._getValue() : {};
-        const ipm = relItemParamMap && relItemParamMap._getValue ? relItemParamMap._getValue() : {};
-        const pf = relPromptFields && relPromptFields._getValue ? relPromptFields._getValue() : [];
-        const anyRelText = relationEnabled.checked && (
-          hasText(relSourceField.value) ||
-          hasText(relTargetParam.value) ||
-          hasText(relMaxItems.value) ||
-          hasText(relTargetTableKey.value) ||
-          hasText(relTargetAppToken.value) ||
-          hasText(relTargetTableId.value) ||
-          hasText(relTargetMatchField.value)
-        );
+        const rps = relationPrompts && relationPrompts._getValue ? relationPrompts._getValue() : [];
+        const hasRel = Array.isArray(rps) && rps.length > 0;
         return (
           hasText(tableKey.value) ||
           hasText(runLogTableKey.value) ||
           hasObj(rf) ||
           hasObj(wf) ||
-          relationEnabled.checked ||
-          anyRelText ||
-          hasObj(ipm) ||
-          (Array.isArray(pf) && pf.length)
+          hasRel
         );
-      }
-      function _buildRelationPromptBackup() {
-        const hasText = (s) => !!String(s || "").trim();
-        const enabled = !!relationEnabled.checked;
-        const rp = {};
-        const sf = (relSourceField.value || "").trim();
-        if (sf) rp.sourceField = sf;
-        const tp = (relTargetParam.value || "").trim();
-        if (tp) rp.targetParam = tp;
-        const mi = (relMaxItems.value || "").trim();
-        if (mi) {
-          const n = parseInt(mi, 10);
-          if (!isNaN(n)) rp.maxItems = n;
-        }
-        const jwRaw = (relJoinWith.value || "").trim();
-        if (jwRaw) rp.joinWith = jwRaw.replace(/\\n/g, "\n");
-        const ttk = (relTargetTableKey.value || "").trim();
-        if (ttk) rp.targetTableKey = ttk;
-        const tam = (relTargetAppToken.value || "").trim();
-        if (tam) rp.targetAppToken = tam;
-        const tti = (relTargetTableId.value || "").trim();
-        if (tti) rp.targetTableId = tti;
-        const tmf = (relTargetMatchField.value || "").trim();
-        if (tmf) rp.targetMatchField = tmf;
-        const ipm = relItemParamMap && relItemParamMap._getValue ? relItemParamMap._getValue() : {};
-        if (ipm && typeof ipm === "object" && Object.keys(ipm).length) rp.itemParamMap = ipm;
-        const pf = relPromptFields && relPromptFields._getValue ? relPromptFields._getValue() : [];
-        if (Array.isArray(pf) && pf.length) rp.promptFields = pf;
-        const hasCore = Object.keys(rp).some((k) => {
-          const v = rp[k];
-          if (typeof v === "number") return true;
-          if (typeof v === "string") return hasText(v);
-          if (Array.isArray(v)) return v.length > 0;
-          return !!(v && typeof v === "object" && Object.keys(v).length);
-        });
-        if (!hasCore) return null;
-        rp.split = !!relSplit.checked;
-        rp.strict = !!relStrict.checked;
-        rp.enableItemParamMap = !!relEnableItemParamMap.checked;
-        rp.enablePromptFields = !!relEnablePromptFields.checked;
-        return {enabled, spec: rp};
       }
       function _buildTableBindingBackup() {
         const hasText = (s) => !!String(s || "").trim();
@@ -1459,11 +1537,8 @@ _PAGE_HTML = r"""
         if (wf && typeof wf === "object" && Object.keys(wf).length) backup.writeBackFields = wf;
         const oniRaw = outputNodeIds && outputNodeIds._getValue ? outputNodeIds._getValue() : {};
         if (oniRaw && typeof oniRaw === "object" && Object.keys(oniRaw).length) backup.outputNodeIds = oniRaw;
-        const rpPack = _buildRelationPromptBackup();
-        if (rpPack && rpPack.spec) {
-          backup.relationPrompt = rpPack.spec;
-          backup.relationPromptEnabled = !!rpPack.enabled;
-        }
+        const rps = relationPrompts && relationPrompts._getValue ? relationPrompts._getValue() : [];
+        if (Array.isArray(rps) && rps.length) backup.relationPrompts = rps;
         const hasAny = Object.keys(backup).some((k) => {
           const v = backup[k];
           if (typeof v === "string") return hasText(v);
@@ -1493,24 +1568,9 @@ _PAGE_HTML = r"""
           }
           outputNodeIds._setValue(oni);
         }
-        const rp = b.relationPrompt && typeof b.relationPrompt === "object" ? b.relationPrompt : null;
-        if (rp) {
-          if (b.relationPromptEnabled != null) relationEnabled.checked = !!b.relationPromptEnabled;
-          else relationEnabled.checked = true;
-          if (rp.sourceField != null && !hasText(relSourceField.value)) relSourceField.value = String(rp.sourceField);
-          if (rp.targetParam != null && !hasText(relTargetParam.value)) relTargetParam.value = String(rp.targetParam);
-          if (rp.split != null) relSplit.checked = !!rp.split;
-          if (rp.strict != null) relStrict.checked = !!rp.strict;
-          if (rp.enableItemParamMap != null) relEnableItemParamMap.checked = !!rp.enableItemParamMap;
-          if (rp.enablePromptFields != null) relEnablePromptFields.checked = !!rp.enablePromptFields;
-          if (rp.maxItems != null && !hasText(relMaxItems.value)) relMaxItems.value = String(rp.maxItems);
-          if (rp.joinWith != null && !hasText(relJoinWith.value)) relJoinWith.value = String(rp.joinWith).replace(/\n/g, "\\n");
-          if (rp.targetTableKey != null && !hasText(relTargetTableKey.value)) relTargetTableKey.value = String(rp.targetTableKey);
-          if (rp.targetAppToken != null && !hasText(relTargetAppToken.value)) relTargetAppToken.value = String(rp.targetAppToken);
-          if (rp.targetTableId != null && !hasText(relTargetTableId.value)) relTargetTableId.value = String(rp.targetTableId);
-          if (rp.targetMatchField != null && !hasText(relTargetMatchField.value)) relTargetMatchField.value = String(rp.targetMatchField);
-          if (rp.itemParamMap && relItemParamMap && relItemParamMap._setValue) relItemParamMap._setValue(rp.itemParamMap);
-          if (rp.promptFields && relPromptFields && relPromptFields._setValue) relPromptFields._setValue(rp.promptFields);
+        const rps = b.relationPrompts || b.relationPrompt || b.relation_prompts || b.relation_prompt || [];
+        if (relationPrompts && relationPrompts._setValue) {
+          relationPrompts._setValue(rps);
         }
       }
       function _clearTableBindingInputs() {
@@ -1518,39 +1578,13 @@ _PAGE_HTML = r"""
         runLogTableKey.value = "";
         if (recordFields && recordFields._setValue) recordFields._setValue({});
         if (writeBackFields && writeBackFields._setValue) writeBackFields._setValue({});
-        relationEnabled.checked = false;
-        relSourceField.value = "";
-        relTargetParam.value = "prompt";
-        relSplit.checked = true;
-        relStrict.checked = true;
-        relEnableItemParamMap.checked = true;
-        relEnablePromptFields.checked = true;
-        relMaxItems.value = "";
-        relTargetTableKey.value = "";
-        relTargetAppToken.value = "";
-        relTargetTableId.value = "";
-        relTargetMatchField.value = "";
-        if (relItemParamMap && relItemParamMap._setValue) relItemParamMap._setValue({});
-        if (relPromptFields && relPromptFields._setValue) relPromptFields._setValue([]);
-        relJoinWith.value = "\\n";
+        if (relationPrompts && relationPrompts._setValue) relationPrompts._setValue([]);
       }
 
-      function applyRelationEnabled() {
-        const show = workflowTableBindingEnabled.checked && relationEnabled.checked;
-        for (const it of Array.from(root.querySelectorAll(".relationOnly"))) it.style.display = show ? "" : "none";
-        const showItem = show && relEnableItemParamMap.checked;
-        const showPrompt = show && relEnablePromptFields.checked;
-        for (const it of Array.from(root.querySelectorAll(".relItemBody"))) it.style.display = showItem ? "" : "none";
-        for (const it of Array.from(root.querySelectorAll(".relPromptBody"))) it.style.display = showPrompt ? "" : "none";
-      }
       function applyWorkflowTableBindingEnabled() {
         const show = bitableEnabled && workflowTableBindingEnabled.checked;
         for (const it of Array.from(root.querySelectorAll(".workflowTableOnly"))) it.style.display = show ? "" : "none";
-        applyRelationEnabled();
       }
-      relationEnabled.onchange = () => applyRelationEnabled();
-      relEnableItemParamMap.onchange = () => applyRelationEnabled();
-      relEnablePromptFields.onchange = () => applyRelationEnabled();
       workflowTableBindingEnabled.onchange = () => {
         if (workflowTableBindingEnabled.checked) {
           const b = _loadTableBindingBackupFromLocalStorage(key) || _getWorkflowTableBindingBackupFromOrig(orig) || null;
@@ -1652,48 +1686,12 @@ _PAGE_HTML = r"""
           el("div", {class:"blockTitle"}, [
             el("div", {class:"blockTitleLeft"}, [
               el("span", {class:"pill", text:"关联"}),
-              el("div", {class:"blockTitleText", text:"relationPrompt（方案B）"}),
-              el("div", {class:"blockTitleSub", text:"用表A的选择值/record_id 去表B查提示词，再拼接成最终 prompt"}),
+              el("div", {class:"blockTitleText", text:"relationPrompts（支持多表）"}),
+              el("div", {class:"blockTitleSub", text:"配置多张关联表，支持笛卡尔积 split 提交多个任务"}),
             ]),
           ]),
           el("div", {class:"form"}, [
-            el("div", {class:"field"}, [
-              el("div", {class:"label", text:"启用 relationPrompt"}),
-              relationEnabled,
-              el("div", {class:"help", text:"开启后会走跨表查询；关闭则回到 recordFields 的普通读取逻辑。"}),
-            ]),
-            el("div", {class:"row2 relationOnly"}, [
-              el("div", {class:"field"}, [el("div", {class:"label", text:"sourceField"}), relSourceField, el("div", {class:"help", text:"表A字段名（例如：选择屏数）。优先使用里面的 record_ids；没有 record_ids 才会用文字匹配。"})]),
-              el("div", {class:"field"}, [el("div", {class:"label", text:"targetParam"}), relTargetParam, el("div", {class:"help", text:"把拼接好的提示词写到哪个参数里（通常是 prompt）。"})]),
-            ]),
-            el("div", {class:"row2 relationOnly"}, [
-              el("div", {class:"field"}, [el("div", {class:"label", text:"split"}), relSplit, el("div", {class:"help", text:"勾选：关联到几条就提交几次。"})]),
-              el("div", {class:"field"}, [el("div", {class:"label", text:"strict"}), relStrict, el("div", {class:"help", text:"勾选：匹配不到表B记录时直接报错，避免悄悄用空提示词提交。"})]),
-            ]),
-            el("div", {class:"field relationOnly"}, [el("div", {class:"label", text:"maxItems"}), relMaxItems, el("div", {class:"help", text:"最多处理多少条关联（默认 20）。"})]),
-            el("div", {class:"row2 relationOnly"}, [
-              el("div", {class:"field"}, [el("div", {class:"label", text:"targetTableKey（推荐）"}), relTargetTableKey, el("div", {class:"help", text:"目标表在 tables 里的 key。填了它就不必填 app_token/table_id。"})]),
-              el("div", {class:"field"}, [el("div", {class:"label", text:"targetMatchField（可选）"}), relTargetMatchField, el("div", {class:"help", text:"当 sourceField 只有文字没有 record_ids 时，用该列做匹配（例如：类型）。"})]),
-            ]),
-            el("div", {class:"row2 relationOnly"}, [
-              el("div", {class:"field"}, [el("div", {class:"label", text:"targetAppToken（可选）"}), relTargetAppToken, el("div", {class:"help", text:"不使用 targetTableKey 时需要填（app_token）。"})]),
-              el("div", {class:"field"}, [el("div", {class:"label", text:"targetTableId（可选）"}), relTargetTableId, el("div", {class:"help", text:"不使用 targetTableKey 时需要填（table_id）。"})]),
-            ]),
-            el("div", {class:"subBlock relationOnly"}, [
-              el("div", {class:"subHeader"}, [el("div", {class:"subTitle", text:"itemParamMap（不拼接）"}), relEnableItemParamMap]),
-              el("div", {class:"relBody relItemBody"}, [
-                el("div", {class:"help", text:"每条关联记录会生成一组参数包。例：prompt_general -> 通用总控提示词。注意：这些 param 需要在下方 params 里配置 targets 才会真正写进 ComfyUI 节点。"}),
-                relItemParamMap,
-              ]),
-            ]),
-            el("div", {class:"subBlock relationOnly"}, [
-              el("div", {class:"subHeader"}, [el("div", {class:"subTitle", text:"promptFields（拼接）"}), relEnablePromptFields]),
-              el("div", {class:"relBody relPromptBody"}, [
-                el("div", {class:"help", text:"会额外生成一段“合成提示词”：按顺序取表B字段，再用 joinWith 拼接，写入 targetParam（通常是 prompt）。如果同时启用 itemParamMap，就等于：既保留独立字段，又生成合成字段。"}),
-                el("div", {class:"field"}, [el("div", {class:"label", text:"joinWith"}), relJoinWith, el("div", {class:"help", text:"拼接多个字段的连接符。填 \\n 表示换行。"})]),
-                relPromptFields,
-              ]),
-            ]),
+            relationPrompts,
           ]),
         ]),
         (() => {
@@ -1758,53 +1756,24 @@ _PAGE_HTML = r"""
               try { const p = JSON.parse(wbOutput.trim()); if (p && typeof p === "object" && !Array.isArray(p)) { out.writeBackFields.output = p; } } catch (_) {}
             }
 
-            if (relationEnabled.checked) {
-              const rp = deepCopy(relOrig && typeof relOrig === "object" ? relOrig : {});
-              const sf = (relSourceField.value || "").trim();
-              if (!sf) throw new Error("relationPrompt 启用时，sourceField 不能为空");
-              rp.sourceField = sf;
-              const tp = (relTargetParam.value || "").trim();
-              rp.targetParam = tp || "prompt";
-              rp.split = !!relSplit.checked;
-              rp.strict = !!relStrict.checked;
-              rp.enableItemParamMap = !!relEnableItemParamMap.checked;
-              rp.enablePromptFields = !!relEnablePromptFields.checked;
-              const mi = (relMaxItems.value || "").trim();
-              if (mi) {
-                const n = parseInt(mi, 10);
-                if (!isNaN(n)) rp.maxItems = n;
-              } else {
-                delete rp.maxItems;
-              }
-              const jw = (relJoinWith.value || "").trim();
-              rp.joinWith = jw ? jw.replace(/\\n/g, "\n") : "\n";
-              const ttk = (relTargetTableKey.value || "").trim();
-              if (ttk) rp.targetTableKey = ttk; else delete rp.targetTableKey;
-              const tam = (relTargetAppToken.value || "").trim();
-              if (tam) rp.targetAppToken = tam; else delete rp.targetAppToken;
-              const tti = (relTargetTableId.value || "").trim();
-              if (tti) rp.targetTableId = tti; else delete rp.targetTableId;
-              const tmf = (relTargetMatchField.value || "").trim();
-              if (tmf) rp.targetMatchField = tmf; else delete rp.targetMatchField;
-
-              const ipm = rp.enableItemParamMap ? relItemParamMap._getValue() : {};
-              const ipmKeys = Object.keys(ipm || {});
-              if (ipmKeys.length) rp.itemParamMap = ipm; else delete rp.itemParamMap;
-
-              const pf = rp.enablePromptFields ? relPromptFields._getValue() : [];
-              if (!pf.length && !ipmKeys.length) throw new Error("relationPrompt 启用时，itemParamMap 或 promptFields 至少启用一个并填写内容");
-              if (pf.length) rp.promptFields = pf; else delete rp.promptFields;
-              out.relationPrompt = rp;
+            const rps = relationPrompts._getValue();
+            if (rps && Array.isArray(rps) && rps.length) {
+              out.relationPrompts = rps;
             } else {
-              delete out.relationPrompt;
+              delete out.relationPrompts;
             }
+            // 删除旧格式的 relationPrompt
+            delete out.relationPrompt;
+            delete out.relation_prompt;
           } else {
             delete out.table;
             delete out.runLogTable;
             delete out.recordFields;
             delete out.writeBackFields;
             delete out.outputNodeIds;
+            delete out.relationPrompts;
             delete out.relationPrompt;
+            delete out.relation_prompt;
           }
           const purposeV = String(purpose || "").trim().toLowerCase();
           const isSave = purposeV === "save";
@@ -1851,7 +1820,6 @@ _PAGE_HTML = r"""
       };
       applyStrictParamValidationTone();
       applyWorkflowTableBindingEnabled();
-      applyRelationEnabled();
       return;
     }
   }
