@@ -1440,6 +1440,12 @@ _PAGE_HTML = r"""
       const baseUrl = el("input", {type:"text", value: String(orig.comfyuiBaseUrl || orig.comfyui_base_url || "")});
       const tableKey = el("input", {type:"text", value: String(orig.table || "")});
       const runLogTableKey = el("input", {type:"text", value: String(orig.runLogTable || orig.run_log_table || orig.runLogTableKey || orig.run_log_table_key || "")});
+      const splitTaskLimit = el("input", {type:"text", value: String((orig.splitTaskLimit != null) ? orig.splitTaskLimit : (orig.split_task_limit != null ? orig.split_task_limit : "")), placeholder:"50"});
+      const splitTaskLimitStrategy = el("select", null, [
+        el("option", {value:"truncate", text:"truncate"}),
+        el("option", {value:"error", text:"error"}),
+      ]);
+      splitTaskLimitStrategy.value = String(orig.splitTaskLimitStrategy || orig.split_task_limit_strategy || "truncate").trim().toLowerCase() === "error" ? "error" : "truncate";
       const defaults = kvEditor(orig.defaults || {}, "key", "value");
       const recordFields = kvEditor(orig.recordFields || orig.record_fields || {}, "参数名(如 prompt)", "列名(如 提示词)");
       const writeBackFields = kvEditor(orig.writeBackFields || orig.write_back_fields || {}, "字段key(如 output)", "列名(如 生成结果)");
@@ -1490,6 +1496,10 @@ _PAGE_HTML = r"""
         if (tableV) out.table = tableV;
         const rlt = String(wf0.runLogTable || wf0.run_log_table || wf0.runLogTableKey || wf0.run_log_table_key || "").trim();
         if (rlt) out.runLogTable = rlt;
+        const stl = String(wf0.splitTaskLimit != null ? wf0.splitTaskLimit : (wf0.split_task_limit != null ? wf0.split_task_limit : "")).trim();
+        if (stl) out.splitTaskLimit = stl;
+        const stls = String(wf0.splitTaskLimitStrategy || wf0.split_task_limit_strategy || "").trim();
+        if (stls) out.splitTaskLimitStrategy = stls;
         const rf = wf0.recordFields || wf0.record_fields || {};
         if (rf && typeof rf === "object" && Object.keys(rf).length) out.recordFields = deepCopy(rf);
         const wb = wf0.writeBackFields || wf0.write_back_fields || {};
@@ -1519,6 +1529,7 @@ _PAGE_HTML = r"""
         return (
           hasText(tableKey.value) ||
           hasText(runLogTableKey.value) ||
+          hasText(splitTaskLimit.value) ||
           hasObj(rf) ||
           hasObj(wf) ||
           hasRel
@@ -1531,6 +1542,10 @@ _PAGE_HTML = r"""
         if (tableV) backup.table = tableV;
         const rlt = (runLogTableKey.value || "").trim();
         if (rlt) backup.runLogTable = rlt;
+        const stl = (splitTaskLimit.value || "").trim();
+        if (stl) backup.splitTaskLimit = stl;
+        const stls = (splitTaskLimitStrategy.value || "").trim();
+        if (stls) backup.splitTaskLimitStrategy = stls;
         const rf = recordFields && recordFields._getValue ? recordFields._getValue() : {};
         if (rf && typeof rf === "object" && Object.keys(rf).length) backup.recordFields = rf;
         const wf = writeBackFields && writeBackFields._getValue ? writeBackFields._getValue() : {};
@@ -1553,6 +1568,11 @@ _PAGE_HTML = r"""
         const hasText = (s) => !!String(s || "").trim();
         if (b.table != null && !hasText(tableKey.value)) tableKey.value = String(b.table);
         if (b.runLogTable != null && !hasText(runLogTableKey.value)) runLogTableKey.value = String(b.runLogTable);
+        if (b.splitTaskLimit != null && !hasText(splitTaskLimit.value)) splitTaskLimit.value = String(b.splitTaskLimit);
+        if (b.splitTaskLimitStrategy != null) {
+          const vv = String(b.splitTaskLimitStrategy || "").trim().toLowerCase();
+          splitTaskLimitStrategy.value = vv === "error" ? "error" : "truncate";
+        }
         if (b.recordFields && recordFields && recordFields._setValue) recordFields._setValue(b.recordFields);
         if (b.writeBackFields && writeBackFields && writeBackFields._setValue) {
           const wb = deepCopy(b.writeBackFields);
@@ -1576,6 +1596,8 @@ _PAGE_HTML = r"""
       function _clearTableBindingInputs() {
         tableKey.value = "";
         runLogTableKey.value = "";
+        splitTaskLimit.value = "";
+        splitTaskLimitStrategy.value = "truncate";
         if (recordFields && recordFields._setValue) recordFields._setValue({});
         if (writeBackFields && writeBackFields._setValue) writeBackFields._setValue({});
         if (relationPrompts && relationPrompts._setValue) relationPrompts._setValue([]);
@@ -1630,6 +1652,10 @@ _PAGE_HTML = r"""
         ]),
         el("div", {class:"field bitableOnly workflowTableOnly"}, [el("div", {class:"label", text:"table"}), tableKey, el("div", {class:"help", text:"绑定的表格 key（对应 tables）。"} )]),
         el("div", {class:"field bitableOnly workflowTableOnly"}, [el("div", {class:"label", text:"runLogTable（运行记录表）"}), runLogTableKey, el("div", {class:"help", text:"把每个子任务的提交/成功/失败/结果写到这张表。填 tables 里的 key（例如 runlog_table）。留空表示不记录。"} )]),
+        el("div", {class:"row2 bitableOnly workflowTableOnly"}, [
+          el("div", {class:"field"}, [el("div", {class:"label", text:"splitTaskLimit"}), splitTaskLimit, el("div", {class:"help", text:"最终最多生成多少个子任务。多张副表 split 时按笛卡尔积后的总数来算。默认 50。"})]),
+          el("div", {class:"field"}, [el("div", {class:"label", text:"splitTaskLimitStrategy"}), splitTaskLimitStrategy, el("div", {class:"help", text:"truncate=超出后只保留前 N 个；error=超出后直接报错，不偷偷少跑。推荐重要任务用 error。"})]),
+        ]),
         el("div", {class:"block"}, [
           el("div", {class:"blockTitle"}, [
             el("div", {class:"blockTitleLeft"}, [
@@ -1749,6 +1775,16 @@ _PAGE_HTML = r"""
             if (tableV) out.table = tableV; else delete out.table;
             const rlt = (runLogTableKey.value || "").trim();
             if (rlt) out.runLogTable = rlt; else delete out.runLogTable;
+            const stl = (splitTaskLimit.value || "").trim();
+            if (stl) {
+              const n = Number(stl);
+              if (!Number.isFinite(n) || n < 1) throw new Error("splitTaskLimit 必须是大于等于 1 的数字");
+              out.splitTaskLimit = Math.floor(n);
+            } else {
+              delete out.splitTaskLimit;
+            }
+            const stls = String(splitTaskLimitStrategy.value || "truncate").trim().toLowerCase();
+            out.splitTaskLimitStrategy = stls === "error" ? "error" : "truncate";
             out.recordFields = recordFields._getValue();
             out.writeBackFields = writeBackFields._getValue();
             const wbOutput = out.writeBackFields.output;
@@ -1768,6 +1804,8 @@ _PAGE_HTML = r"""
           } else {
             delete out.table;
             delete out.runLogTable;
+            delete out.splitTaskLimit;
+            delete out.splitTaskLimitStrategy;
             delete out.recordFields;
             delete out.writeBackFields;
             delete out.outputNodeIds;

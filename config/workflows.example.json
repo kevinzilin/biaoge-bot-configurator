@@ -191,11 +191,13 @@
     },
 
     "test-gpt-image-multi-relation": {
-      "_说明": "本地 ComfyUI + 多张关联表。使用 relationPrompts 数组配置多个关联表。如果多个关联表都开启 split，则会进行笛卡尔积组合拆分。例如：关联表A有2条、关联表B有3条，则总共生成 2×3=6 个子任务。",
+      "_说明": "本地 ComfyUI + 多张关联表。使用 relationPrompts 数组配置多个关联表。如果多个关联表都开启 split，则会进行笛卡尔积组合拆分。例如：关联表A有2条、关联表B有3条，则总共生成 2×3=6 个子任务。maxItems 控制每张副表最多读取多少条；splitTaskLimit 控制笛卡尔积后最终最多允许生成多少个子任务；splitTaskLimitStrategy=error 表示超限直接报错，避免悄悄少跑。",
       "workflowName": "test-gpt-image",
       "comfyuiBaseUrl": "http://127.0.0.1:8188",
       "table": "gpt_test_table",
       "runLogTable": "runlog_table",
+      "splitTaskLimit": 100,
+      "splitTaskLimitStrategy": "error",
       "recordFields": {
         "images": "产品图"
       },

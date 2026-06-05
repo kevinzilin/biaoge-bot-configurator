@@ -1847,10 +1847,44 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
         file_paths = uniq
 
     typed_file_tokens: dict[str, list[dict[str, Any]]] = {"image": [], "video": [], "audio": [], "text": []}
+    upload_token_cache: dict[tuple[str, bool, str], str] = {}
+    upload_error_cache: dict[tuple[str, bool, str], str] = {}
+
+    async def _upload_to_bitable_once(*, app_token0: str, file_path0: str, as_image0: bool) -> str:
+        try:
+            abs_path0 = os.path.abspath(file_path0)
+        except Exception:
+            abs_path0 = str(file_path0 or "")
+        cache_key = (str(app_token0 or "").strip(), bool(as_image0), abs_path0)
+        if cache_key in upload_token_cache:
+            logging.info(
+                "reuse uploaded file_token: app_token=%s as_image=%s file=%s",
+                cache_key[0],
+                cache_key[1],
+                abs_path0,
+            )
+            return upload_token_cache[cache_key]
+        if cache_key in upload_error_cache:
+            raise RuntimeError(upload_error_cache[cache_key])
+        try:
+            up = await ctx.drive.upload_to_bitable(
+                app_token=cache_key[0],
+                file_path=file_path0,
+                as_image=cache_key[1],
+            )
+            file_token0 = str(up.file_token or "").strip()
+            if not file_token0:
+                raise RuntimeError("upload_to_bitable succeeded but file_token is empty")
+            upload_token_cache[cache_key] = file_token0
+            return file_token0
+        except Exception as e:
+            upload_error_cache[cache_key] = str(e)
+            raise
     if (
         write_back_enabled
         and record_id
         and file_paths
+        and bitable
         and bitable
         and table_cfg
         and bitable.mode.write_enabled
@@ -1861,12 +1895,12 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
             otype = entry.get("type", "image") if isinstance(entry, dict) else "image"
             as_img = otype == "image"
             try:
-                up = await ctx.drive.upload_to_bitable(
-                    app_token=table_cfg.app_token,
-                    file_path=fp,
-                    as_image=as_img,
+                file_token = await _upload_to_bitable_once(
+                    app_token0=table_cfg.app_token,
+                    file_path0=fp,
+                    as_image0=as_img,
                 )
-                token_dict = {"file_token": up.file_token}
+                token_dict = {"file_token": file_token}
                 file_tokens.append(token_dict)
                 if otype in typed_file_tokens:
                     typed_file_tokens[otype].append(token_dict)
@@ -1890,12 +1924,12 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
             otype = entry.get("type", "image") if isinstance(entry, dict) else "image"
             as_img = otype == "image"
             try:
-                up = await ctx.drive.upload_to_bitable(
-                    app_token=runlog_cfg.app_token,
-                    file_path=fp,
-                    as_image=as_img,
+                file_token = await _upload_to_bitable_once(
+                    app_token0=runlog_cfg.app_token,
+                    file_path0=fp,
+                    as_image0=as_img,
                 )
-                runlog_file_tokens.append({"file_token": up.file_token})
+                runlog_file_tokens.append({"file_token": file_token})
             except Exception as e:
                 msg = f"Failed to upload(runlog) {fp}: {e}"
                 writeback_errors.append(msg)
@@ -2023,12 +2057,27 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
     target_chat_id = str(chat_id or "").strip()
     target_open_id = str(user_open_id or "").strip()
 
-    async def _notify_text(im: IMClient, text: str) -> None:
-        if target_chat_id:
-            await im.send_text(chat_id=target_chat_id, text=text)
-            return
-        if target_open_id:
-            await im.send_text_to_open_id(open_id=target_open_id, text=text)
+    async def _notify_text(im: IMClient, text: str) -> bool:
+        if not str(text or "").strip():
+            return False
+        try:
+            if target_chat_id:
+                await im.send_text(chat_id=target_chat_id, text=text)
+                return True
+            if target_open_id:
+                await im.send_text_to_open_id(open_id=target_open_id, text=text)
+                return True
+        except Exception as e:
+            logging.warning(
+                "notify_text failed: record_id=%s prompt_id=%s target_chat_id=%s target_open_id=%s err=%s",
+                record_id,
+                prompt_id,
+                target_chat_id,
+                target_open_id,
+                str(e),
+            )
+            return False
+        return False
 
     if target_chat_id or target_open_id:
         im = IMClient(ctx.auth)
@@ -2181,12 +2230,29 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
             except Exception:
                 pass
 
+    temp_dir_cfg = str(getattr(getattr(ctx, "settings", None), "temp_download_dir", "") or "").strip()
+    temp_dir_abs = ""
+    if temp_dir_cfg:
+        try:
+            temp_dir_abs = os.path.normcase(os.path.abspath(temp_dir_cfg))
+        except Exception:
+            temp_dir_abs = ""
+
+    def _is_under_temp_dir(fp: str) -> bool:
+        if not fp or not temp_dir_abs:
+            return False
+        try:
+            fp_abs = os.path.normcase(os.path.abspath(fp))
+            return os.path.commonpath([fp_abs, temp_dir_abs]) == temp_dir_abs
+        except Exception:
+            return False
+
     for entry in file_paths:
         fp = entry["path"] if isinstance(entry, dict) else entry
         try:
-            if fp and os.path.exists(fp) and ctx.settings.temp_download_dir in os.path.abspath(fp):
+            if fp and os.path.exists(fp) and _is_under_temp_dir(str(fp)):
                 os.remove(fp)
-        except Exception:
-            pass
+        except Exception as e:
+            logging.warning("temp file cleanup failed: file=%s err=%s", fp, str(e))
 
     return {"ok": True}
