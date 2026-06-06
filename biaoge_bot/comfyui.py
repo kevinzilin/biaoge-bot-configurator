@@ -76,6 +76,14 @@ def _read_response_text(response: httpx.Response) -> str:
             return ""
 
 
+def _read_response_json(response: httpx.Response) -> dict[str, Any] | None:
+    try:
+        data = response.json()
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def _looks_like_retryable_workflow_payload_error(response: httpx.Response) -> bool:
     status = int(getattr(response, "status_code", 0) or 0)
     if status not in (400, 404, 422):
@@ -89,16 +97,21 @@ def _looks_like_retryable_workflow_payload_error(response: httpx.Response) -> bo
         "nodeinfolist_invalid",
         "workflow_not_found",
         "prompt_outputs_failed_validation",
+        "missing_node_type",
         "node_not_found",
+        "custom node may not be installed",
+        "the custom node may not be installed",
+        "class_type",
         "\"msg\": \"error\"",
         "\"status\": \"error\"",
     )
     if any(marker in body for marker in terminal_markers):
         return False
+    if "node '" in body and "not found" in body:
+        return False
     # 只有看起来像“字段名/请求外壳不匹配”时，才允许尝试下一种 payload 写法。
     retryable_markers = (
         "field required",
-        "missing",
         "workflowname",
         "workflow_name",
         "nodeinfolist",
@@ -167,6 +180,7 @@ class ComfyUIClient:
 
         last: httpx.Response | None = None
         last_payload: dict[str, Any] | None = None
+        attempts: list[dict[str, Any]] = []
         async with httpx.AsyncClient(timeout=30) as client:
             for idx, (variant_name, payload) in enumerate(payloads):
                 r = await client.post(f"{self._base_url}/prompt_workflow", json=payload)
@@ -175,28 +189,51 @@ class ComfyUIClient:
                 if 200 <= r.status_code < 300:
                     data = r.json()
                     return ComfyQueued(prompt_id=data.get("prompt_id"), raw=data)
+                body_text = _read_response_text(r)
+                body_obj = _read_response_json(r)
+                attempts.append(
+                    {
+                        "variant": variant_name,
+                        "status_code": r.status_code,
+                        "body_text": body_text,
+                        "body_obj": body_obj,
+                        "prompt_id": (body_obj or {}).get("prompt_id") if isinstance(body_obj, dict) else None,
+                    }
+                )
                 if r.status_code not in (400, 404, 422):
-                    r.raise_for_status()
+                    try:
+                        r.raise_for_status()
+                    except httpx.HTTPStatusError as e:
+                        setattr(e, "prompt_workflow_attempts", attempts)
+                        raise
                 if idx < len(payloads) - 1 and _looks_like_retryable_workflow_payload_error(r):
                     logging.warning(
                         "prompt_workflow variant failed but looks retryable, trying next variant: variant=%s status=%s body=%s",
                         variant_name,
                         r.status_code,
-                        _read_response_text(r)[:300],
+                        body_text[:300],
                     )
                     continue
                 logging.warning(
                     "prompt_workflow variant failed and will stop retrying: variant=%s status=%s body=%s",
                     variant_name,
                     r.status_code,
-                    _read_response_text(r)[:300],
+                    body_text[:300],
                 )
                 _dump_failed_request(r, payload)
-                r.raise_for_status()
+                try:
+                    r.raise_for_status()
+                except httpx.HTTPStatusError as e:
+                    setattr(e, "prompt_workflow_attempts", attempts)
+                    raise
         if last is None:
             raise RuntimeError("queue_workflow failed: no response")
         _dump_failed_request(last, last_payload)
-        last.raise_for_status()
+        try:
+            last.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            setattr(e, "prompt_workflow_attempts", attempts)
+            raise
         raise RuntimeError("queue_workflow failed")
 
     async def upload_image(

@@ -312,10 +312,37 @@ def _looks_like_workflow_missing(body_text: str, body_obj: dict[str, Any] | None
         "cannot find workflow",
         "no workflow",
         "route not found",
+        "method not allowed",
         "plugin unavailable",
         "plugin not installed",
     )
     return any(p in joined for p in patterns)
+
+
+def _looks_like_missing_node_type(body_text: str, body_obj: dict[str, Any] | None) -> bool:
+    hay = str(body_text or "").lower()
+    msg_parts: list[str] = [hay]
+    if isinstance(body_obj, dict):
+        err = body_obj.get("error")
+        if isinstance(err, dict):
+            msg_parts.extend([
+                str(err.get("type") or "").lower(),
+                str(err.get("message") or "").lower(),
+                str(err.get("details") or "").lower(),
+            ])
+            extra = err.get("extra_info")
+            if isinstance(extra, dict):
+                msg_parts.extend([
+                    str(extra.get("class_type") or "").lower(),
+                    str(extra.get("node_title") or "").lower(),
+                    str(extra.get("node_id") or "").lower(),
+                ])
+    joined = "\n".join(msg_parts)
+    if "missing_node_type" in joined:
+        return True
+    if "custom node may not be installed" in joined:
+        return True
+    return "node '" in joined and "not found" in joined
 
 
 def _extract_first_node_error(body_obj: dict[str, Any] | None) -> tuple[str | None, str | None, str | None]:
@@ -350,7 +377,26 @@ def _build_workflowprompt_user_error(
     error_type = str(error_block.get("type") or "") if isinstance(error_block, dict) else ""
     error_message = str(error_block.get("message") or "") if isinstance(error_block, dict) else ""
     error_details = str(error_block.get("details") or "") if isinstance(error_block, dict) else ""
+    error_extra = error_block.get("extra_info") if isinstance(error_block, dict) else None
     node_id, node_message, node_details = _extract_first_node_error(body_obj)
+
+    if _looks_like_missing_node_type(body_text, body_obj):
+        missing_node = ""
+        missing_node_id = ""
+        if isinstance(error_extra, dict):
+            missing_node = str(error_extra.get("class_type") or error_extra.get("node_title") or "").strip()
+            missing_node_id = str(error_extra.get("node_id") or "").strip()
+        if not missing_node:
+            missing_node = error_message.strip()
+        msg = "执行失败：工作流里缺少 ComfyUI 节点，不能继续运行。"
+        if missing_node:
+            msg += f"\n缺少节点：{missing_node}"
+        if missing_node_id:
+            msg += f"\n出错节点ID：{missing_node_id}"
+        if error_details:
+            msg += f"\n补充信息：{error_details[:200]}"
+        msg += "\n请先在 ComfyUI 安装对应自定义节点，再重新执行。"
+        return msg, False
 
     if node_id or error_type == "prompt_outputs_failed_validation":
         hint = "请检查你传入的参数值是否真的有效。"
@@ -380,6 +426,69 @@ def _build_workflowprompt_user_error(
         return f"执行失败：ComfyUI 返回了错误。{summary}", False
     code = status_code if status_code is not None else "unknown"
     return f"执行失败：ComfyUI 返回错误（HTTP {code}）。", False
+
+
+def _normalize_workflowprompt_attempts(
+    *,
+    status_code: int | None,
+    body_text: str,
+    attempts: Any,
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    if isinstance(attempts, list):
+        for item in attempts:
+            if not isinstance(item, dict):
+                continue
+            item_body = str(item.get("body_text") or "")
+            item_obj = item.get("body_obj")
+            if not isinstance(item_obj, dict):
+                item_obj = _parse_json_object(item_body)
+            out.append(
+                {
+                    "variant": str(item.get("variant") or ""),
+                    "status_code": item.get("status_code"),
+                    "body_text": item_body,
+                    "body_obj": item_obj,
+                    "prompt_id": item.get("prompt_id"),
+                }
+            )
+    if out:
+        return out
+    return [
+        {
+            "variant": "",
+            "status_code": status_code,
+            "body_text": str(body_text or ""),
+            "body_obj": _parse_json_object(body_text),
+            "prompt_id": None,
+        }
+    ]
+
+
+def _pick_primary_workflowprompt_attempt(attempts: list[dict[str, Any]]) -> dict[str, Any]:
+    for item in attempts:
+        body_text = str(item.get("body_text") or "")
+        body_obj = item.get("body_obj")
+        if _looks_like_missing_node_type(body_text, body_obj if isinstance(body_obj, dict) else None):
+            return item
+    for item in attempts:
+        body_text = str(item.get("body_text") or "")
+        body_obj = item.get("body_obj")
+        if _looks_like_workflow_missing(body_text, body_obj if isinstance(body_obj, dict) else None):
+            return item
+    return attempts[-1] if attempts else {"status_code": None, "body_text": "", "body_obj": None, "prompt_id": None}
+
+
+def _collect_failed_probe_prompt_ids(attempts: list[dict[str, Any]]) -> list[str]:
+    out: list[str] = []
+    for item in attempts:
+        pid = item.get("prompt_id")
+        if not pid and isinstance(item.get("body_obj"), dict):
+            pid = item["body_obj"].get("prompt_id") or item["body_obj"].get("promptId")
+        pid_s = str(pid or "").strip()
+        if pid_s and pid_s not in out:
+            out.append(pid_s)
+    return out
 
 
 def _b64url_json_decode(data: str) -> dict[str, Any] | None:
@@ -1713,6 +1822,7 @@ async def run_workflow(
     prompt_id: str | None = None
     err_msg: str | None = None
     prompt_ids: list[str] = []
+    failed_probe_prompt_ids: list[str] = []
     prompt_parts: list[str] | None = None
     planned_total = 1
     try:
@@ -1976,6 +2086,24 @@ async def run_workflow(
         body_short = body_text.strip()
         if len(body_short) > 800:
             body_short = body_short[:800] + "..."
+        attempts = _normalize_workflowprompt_attempts(
+            status_code=status,
+            body_text=body_text,
+            attempts=getattr(e, "prompt_workflow_attempts", None),
+        )
+        primary_attempt = _pick_primary_workflowprompt_attempt(attempts)
+        primary_status = primary_attempt.get("status_code")
+        primary_body_text = str(primary_attempt.get("body_text") or body_text or "")
+        primary_body_obj = primary_attempt.get("body_obj")
+        primary_body_short = primary_body_text.strip()
+        if len(primary_body_short) > 800:
+            primary_body_short = primary_body_short[:800] + "..."
+        failed_probe_prompt_ids = _collect_failed_probe_prompt_ids(attempts)
+        if failed_probe_prompt_ids and getattr(ctx, "runner", None) and hasattr(ctx.runner, "register_ignored_prompt_ids"):
+            try:
+                await ctx.runner.register_ignored_prompt_ids(prompt_ids=failed_probe_prompt_ids)
+            except Exception:
+                pass
         logging.warning(
             "comfyui submit http error: workflow_key=%s workflow_name=%s record_id=%s status=%s api_workflow_path=%r prompt_ids_submitted=%s response=%s",
             workflow_key,
@@ -2020,19 +2148,19 @@ async def run_workflow(
         if provider == "runninghub":
             err_msg = f"HTTPError {status if status is not None else 'unknown'}: {e}"
         else:
-            if status in (400, 404, 422):
+            if status in (400, 404, 405, 422):
                 user_msg, allow_fallback = _build_workflowprompt_user_error(
                     workflow_name=getattr(wf, "workflow_name", workflow_key),
-                    status_code=status,
-                    body_text=body_text,
+                    status_code=primary_status if isinstance(primary_status, int) else status,
+                    body_text=primary_body_text,
                 )
                 logging.warning(
                     "workflowprompt failed: workflow=%s status=%s allow_fallback=%s api_workflow_path=%r response=%s",
                     getattr(wf, "workflow_name", workflow_key),
-                    status,
+                    primary_status if primary_status is not None else status,
                     allow_fallback,
                     api_workflow_path,
-                    body_short,
+                    primary_body_short,
                 )
                 if not allow_fallback:
                     logging.warning(
@@ -2079,6 +2207,39 @@ async def run_workflow(
                                 inputs[field_name] = it.get("fieldValue")
                         res = await comfyui_client.queue_api_prompt(prompt=prompt, extra_data=extra_data)
                         prompt_id = res.prompt_id
+                        if prompt_id:
+                            prompt_ids.append(prompt_id)
+                        if prompt_id and temp_files and getattr(ctx, "runner", None) and hasattr(ctx.runner, "register_temp_files"):
+                            try:
+                                await ctx.runner.register_temp_files(prompt_id=prompt_id, file_paths=temp_files)
+                            except Exception:
+                                pass
+                        if prompt_id and getattr(ctx, "runner", None):
+                            if hasattr(ctx.runner, "register_prompt_context"):
+                                try:
+                                    await ctx.runner.register_prompt_context(
+                                        prompt_id=prompt_id,
+                                        record_id=record_id,
+                                        table_key=resolved_table_key,
+                                        workflow_key=workflow_key,
+                                        chat_id=trigger.chat_id,
+                                        user_open_id=trigger.user_open_id,
+                                        run_log_table_key=run_log_table_key,
+                                        run_log_record_id=run_log_record_id,
+                                        run_log_submitted_at_ms=run_log_submitted_at_ms,
+                                        split_group=split_group,
+                                        split_total=len(runs) if (split_values or split_items) else None,
+                                        split_index=idx if (split_values or split_items) else None,
+                                        append_output=True if (split_values or split_items) else None,
+                                    )
+                                except Exception:
+                                    pass
+                            if hasattr(ctx.runner, "register_pending_remote"):
+                                try:
+                                    if provider == "runninghub" or (provider != "runninghub" and not _is_local_base_url(comfyui_base_url)):
+                                        await ctx.runner.register_pending_remote(prompt_id=prompt_id, provider=provider, comfyui_base_url=comfyui_base_url)
+                                except Exception:
+                                    pass
                         logging.warning(
                             "workflowprompt fallback done: workflow_key=%s workflow_name=%s record_id=%s api_workflow_path=%r prompt_id=%r",
                             workflow_key,

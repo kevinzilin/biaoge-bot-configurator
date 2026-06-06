@@ -42,6 +42,7 @@ class QueueRunner:
         self._prompt_temp_files: dict[str, list[str]] = {}
         self._prompt_ctx: dict[str, dict[str, Any]] = {}
         self._pending_remote: dict[str, dict[str, Any]] = {}
+        self._ignored_prompt_ids: dict[str, float] = {}
         self._record_runs: dict[tuple[str, str], _RecordRunState] = {}
         self._filling: set[str] = set()
         self._poller_started = False
@@ -560,6 +561,32 @@ class QueueRunner:
                 "comfyui_base_url": comfyui_base_url,
                 "created_at": time.time(),
             }
+
+    async def register_ignored_prompt_ids(self, *, prompt_ids: list[str]) -> None:
+        now = time.time()
+        clean_ids = [str(x or "").strip() for x in (prompt_ids or []) if str(x or "").strip()]
+        if not clean_ids:
+            return
+        async with self._lock:
+            for pid0, ts0 in list(self._ignored_prompt_ids.items()):
+                if not pid0 or (now - float(ts0 or 0.0)) > 3600:
+                    self._ignored_prompt_ids.pop(pid0, None)
+            for pid in clean_ids:
+                self._ignored_prompt_ids[pid] = now
+
+    async def consume_ignored_prompt(self, *, prompt_id: str) -> bool:
+        pid = str(prompt_id or "").strip()
+        if not pid:
+            return False
+        now = time.time()
+        async with self._lock:
+            for pid0, ts0 in list(self._ignored_prompt_ids.items()):
+                if not pid0 or (now - float(ts0 or 0.0)) > 3600:
+                    self._ignored_prompt_ids.pop(pid0, None)
+            hit = pid in self._ignored_prompt_ids
+            if hit:
+                self._ignored_prompt_ids.pop(pid, None)
+            return hit
 
     async def resolve_prompt(self, *, prompt_id: str) -> dict[str, Any] | None:
         async with self._lock:

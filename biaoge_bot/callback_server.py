@@ -1535,6 +1535,13 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
 
     prompt_id = payload.get("prompt_id") or payload.get("promptId")
     prompt_id = str(prompt_id) if isinstance(prompt_id, str) and prompt_id else None
+    if prompt_id and getattr(ctx, "runner", None) and hasattr(ctx.runner, "consume_ignored_prompt"):
+        try:
+            if await ctx.runner.consume_ignored_prompt(prompt_id=prompt_id):
+                logging.info("callback ignored for discarded prompt_id=%s", prompt_id)
+                return {"ok": True, "ignored": True}
+        except Exception:
+            pass
 
     cb_ctx = _extract_callback_context(payload)
     record_id = cb_ctx.get("record_id") or cb_ctx.get("recordId")
