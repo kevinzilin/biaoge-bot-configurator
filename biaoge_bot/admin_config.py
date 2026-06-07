@@ -832,17 +832,38 @@ _PAGE_HTML = r"""
     function relationPromptsEditor(initialPrompts) {
       const wrap = el("div", {class:"kvWrap"});
       const list = el("div", {class:"kvWrap"});
+      const helpEl = el("div", {class:"help", text:"配置多张子表，支持笛卡尔积split。"});
+
+      function renumberCards() {
+        const cards = Array.from(list.children);
+        for (let i = 0; i < cards.length; i++) {
+          const card = cards[i];
+          if (card && card._pillEl) card._pillEl.textContent = "子表" + String(i + 1);
+        }
+      }
+
+      function updateEmptyVis() {
+        const empty = list.children.length === 0;
+        helpEl.style.display = empty ? "none" : "";
+        list.style.display = empty ? "none" : "";
+        renumberCards();
+      }
 
       function addPromptItem(promptSpec) {
         const orig = promptSpec && typeof promptSpec === "object" ? promptSpec : {};
         const card = el("div", {class:"card paramCard", style:"padding:12px"});
+        const pillEl = el("span", {class:"pill", text:"子表"});
         const head = el("div", {class:"sectionHeader"}, [
-          el("span", {class:"pill", text:"关联表"}),
-          el("div", {style:"flex:1; font-weight:600; color:rgba(229,231,235,0.92);"}),
+          pillEl,
+          el("div", {style:"flex:1"}),
           el("button", {type:"button", text:"删除", class:"btnDanger"})
         ]);
         const delBtn = head.querySelector("button");
-        delBtn.onclick = () => card.remove();
+        delBtn.onclick = () => {
+          card.remove();
+          updateEmptyVis();
+        };
+        card._pillEl = pillEl;
 
         const sourceField = el("input", {type:"text", value: String(orig.sourceField || orig.source_field || ""), placeholder:"表A字段名(如 选择屏数)"});
         const targetParam = el("input", {type:"text", value: String(orig.targetParam || orig.target_param || "prompt"), placeholder:"目标参数名(如 prompt)"});
@@ -869,10 +890,10 @@ _PAGE_HTML = r"""
         const form = el("div", {class:"form"}, [
           el("div", {class:"row2"}, [
             el("div", {class:"field"}, [el("div", {class:"label", text:"sourceField"}), sourceField, el("div", {class:"help", text:"表A字段名，支持record_id或文字匹配。"})]),
-            el("div", {class:"field"}, [el("div", {class:"label", text:"maxItems"}), maxItems, el("div", {class:"help", text:"最多处理多少条关联。"})])
+            el("div", {class:"field"}, [el("div", {class:"label", text:"maxItems"}), maxItems, el("div", {class:"help", text:"最多处理多少条匹配结果。"})])
           ]),
           el("div", {class:"row2"}, [
-            el("div", {class:"field"}, [el("div", {class:"label", text:"split"}), split, el("div", {class:"help", text:"关联到几条就提交几次。"})]),
+            el("div", {class:"field"}, [el("div", {class:"label", text:"split"}), split, el("div", {class:"help", text:"匹配到几条就提交几次。"})]),
             el("div", {class:"field"}, [el("div", {class:"label", text:"strict"}), strict, el("div", {class:"help", text:"匹配不到时直接报错。"})])
           ]),
           el("div", {class:"row2"}, [
@@ -902,6 +923,7 @@ _PAGE_HTML = r"""
         card.appendChild(head);
         card.appendChild(form);
         list.appendChild(card);
+        updateEmptyVis();
 
         function applyVis() {
           const subBlocks = card.querySelectorAll(".subBlock");
@@ -952,15 +974,17 @@ _PAGE_HTML = r"""
       const init = Array.isArray(initialPrompts) ? initialPrompts : ((initialPrompts && typeof initialPrompts === "object") ? [initialPrompts] : []);
       if (init.length) {
         for (const p of init) addPromptItem(p);
-      } else {
-        addPromptItem({});
       }
 
-      const addBtn = el("button", {type:"button", text:"添加关联表", class:"btnGhost"});
-      addBtn.onclick = () => addPromptItem({});
-      wrap.appendChild(el("div", {class:"help", text:"配置多张关联表，支持笛卡尔积split。"}));
+      const addBtn = el("button", {type:"button", text:"添加子表", class:"btnGhost"});
+      addBtn.onclick = () => {
+        addPromptItem({});
+        updateEmptyVis();
+      };
+      wrap.appendChild(helpEl);
       wrap.appendChild(list);
       wrap.appendChild(addBtn);
+      updateEmptyVis();
 
       wrap._getValue = () => {
         const out = [];
@@ -976,9 +1000,8 @@ _PAGE_HTML = r"""
         const arr = Array.isArray(prompts) ? prompts : ((prompts && typeof prompts === "object") ? [prompts] : []);
         if (arr.length) {
           for (const p of arr) addPromptItem(p);
-        } else {
-          addPromptItem({});
         }
+        updateEmptyVis();
       };
 
       return wrap;
@@ -1646,9 +1669,9 @@ _PAGE_HTML = r"""
           el("div", {class:"field"}, [el("div", {class:"label", text:"comfyuiBaseUrl（可选）"}), baseUrl, el("div", {class:"help", text:"不填则用 .env 的 COMFYUI_BASE_URL。"})]),
         ]),
         el("div", {class:"field bitableOnly"}, [
-          el("div", {class:"label", text:"关联表格"}),
+          el("div", {class:"label", text:"表格绑定"}),
           workflowTableBindingEnabled,
-          el("div", {class:"help", text:"总开关。关闭时会隐藏并在保存时清空 table、runLogTable、recordFields、writeBackFields、relationPrompt 这些表格相关配置。"}),
+          el("div", {class:"help", text:"总开关。关闭时会隐藏并在保存时清空 table、runLogTable、recordFields、writeBackFields、relationPrompts 这些表格相关配置。"}),
         ]),
         el("div", {class:"field bitableOnly workflowTableOnly"}, [el("div", {class:"label", text:"table"}), tableKey, el("div", {class:"help", text:"绑定的表格 key（对应 tables）。"} )]),
         el("div", {class:"field bitableOnly workflowTableOnly"}, [el("div", {class:"label", text:"runLogTable（运行记录表）"}), runLogTableKey, el("div", {class:"help", text:"把每个子任务的提交/成功/失败/结果写到这张表。填 tables 里的 key（例如 runlog_table）。留空表示不记录。"} )]),
@@ -1711,9 +1734,9 @@ _PAGE_HTML = r"""
         el("div", {class:"block bitableOnly workflowTableOnly"}, [
           el("div", {class:"blockTitle"}, [
             el("div", {class:"blockTitleLeft"}, [
-              el("span", {class:"pill", text:"关联"}),
-              el("div", {class:"blockTitleText", text:"relationPrompts（支持多表）"}),
-              el("div", {class:"blockTitleSub", text:"配置多张关联表，支持笛卡尔积 split 提交多个任务"}),
+              el("span", {class:"pill", text:"子表"}),
+              el("div", {class:"blockTitleText", text:"relationPrompts"}),
+              el("div", {class:"blockTitleSub", text:"配置多张子表，支持笛卡尔积 split 提交多个任务"}),
             ]),
           ]),
           el("div", {class:"form"}, [
