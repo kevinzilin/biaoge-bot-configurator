@@ -1155,6 +1155,52 @@ def create_callback_app(ctx: AppContext) -> FastAPI:
             if bitable is None or not bitable.mode.read_enabled:
                 err_msg = "无法读取表格，无法执行批量(batch/drain)操作。"
                 return {"ok": False, "error": err_msg}
+            table_cfg = ctx.bitable_configs.get(table_key)
+            if not table_cfg:
+                return {"ok": False, "error": f"缺少 tables 配置：table={table_key}"}
+            if not bitable.mode.write_enabled:
+                return {
+                    "ok": False,
+                    "error": "表格写入被禁用，/drain 需要把“待处理”改成“执行中”才能抢单。",
+                    "hint": {
+                        "table": table_key,
+                        "workflow": workflow_key,
+                        "bitable_mode": {
+                            "read_enabled": bool(getattr(bitable.mode, "read_enabled", False)),
+                            "write_enabled": bool(getattr(bitable.mode, "write_enabled", False)),
+                        },
+                    },
+                }
+            status_field = table_cfg.fields.get("status")
+            queued_value = table_cfg.status_values.get("queued")
+            running_value = table_cfg.status_values.get("running")
+            if not status_field or not queued_value or not running_value:
+                return {
+                    "ok": False,
+                    "error": "表格配置不完整，/drain 无法判断“待处理/执行中”。",
+                    "hint": {
+                        "table": table_key,
+                        "workflow": workflow_key,
+                        "status_field": status_field or "",
+                        "queued_value": queued_value or "",
+                        "running_value": running_value or "",
+                    },
+                }
+            preview: list[str] = []
+            try:
+                items = await bitable.search_records(
+                    filter_={
+                        "conjunction": "and",
+                        "conditions": [{"field_name": status_field, "operator": "is", "value": [queued_value]}],
+                    },
+                    page_size=min(max(1, batch), 10),
+                )
+                for it in items:
+                    rid = it.get("record_id")
+                    if rid:
+                        preview.append(str(rid))
+            except Exception:
+                preview = []
                 
             await ctx.runner.start(
                 workflow_key=workflow_key,
@@ -1164,7 +1210,31 @@ def create_callback_app(ctx: AppContext) -> FastAPI:
                 drain=(name == "drain"),
                 chat_id=None,
             )
-            return {"ok": True, "started": {"workflow": workflow_key, "table": table_key}}
+            started: dict[str, Any] = {"workflow": workflow_key, "table": table_key}
+            if preview:
+                started["queued_preview"] = preview
+            else:
+                started["queued_preview"] = []
+                started["queued_preview_hint"] = {"status_field": status_field, "queued_value": queued_value}
+                try:
+                    sample_items = await bitable.search_records(page_size=20)
+                    status_samples: list[str] = []
+                    seen: set[str] = set()
+                    for it in sample_items:
+                        fields = it.get("fields") if isinstance(it, dict) and isinstance(it.get("fields"), dict) else {}
+                        texts = _collect_display_strings(fields.get(status_field))
+                        for t in texts[:1]:
+                            s = str(t or "").strip()
+                            if s and s not in seen:
+                                seen.add(s)
+                                status_samples.append(s)
+                        if len(status_samples) >= 8:
+                            break
+                    if status_samples:
+                        started["status_samples"] = status_samples
+                except Exception:
+                    pass
+            return {"ok": True, "started": started}
 
         if name == "stop_queue":
             workflow_key = str(args.get("workflow") or args.get("workflowName") or args.get("wf") or args.get("name") or "")

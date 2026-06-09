@@ -680,6 +680,7 @@ class QueueRunner:
                     st3 = self._runs.get(rk)
                     if st3 and ids:
                         st3.empty_claims = 0
+                        st3.total_claimed = int(getattr(st3, "total_claimed", 0) or 0) + len(ids)
                     if st3 and not st3.drain and isinstance(st3.remaining, int):
                         st3.remaining = max(0, int(st3.remaining) - len(ids))
                 if not ids:
@@ -692,7 +693,21 @@ class QueueRunner:
                                 should_retry = st2.empty_claims < 3
                             else:
                                 should_retry = False
+                            
+                            if not should_retry:
                                 st2.active = False
+                                # 如果是第一次进来就发现没数据（从没成功抢过单），才发送友好提示
+                                # 如果已经成功抢过单了（表示已经处理完了一批），就不再打扰用户
+                                if st2.chat_id and getattr(st2, "total_claimed", 0) == 0:
+                                    ctx0 = self._ctx
+                                    if ctx0:
+                                        try:
+                                            from .im import IMClient
+                                            im = IMClient(ctx0.auth)
+                                            msg = f"队列 {st2.workflow_key} 在表 {st2.table_key} 中未找到可抢的“待处理”记录。可能是被过滤掉或字段缺失。"
+                                            asyncio.create_task(im.send_text(chat_id=st2.chat_id, text=msg))
+                                        except Exception as e:
+                                            logging.error("Failed to send empty claim notice: %s", e)
                         else:
                             should_retry = False
                     if should_retry:
@@ -757,8 +772,13 @@ class QueueRunner:
                 params={},
                 table_key=st.table_key,
             )
+            if prompt_id:
+                logging.info("_queue_one success: workflow=%s record_id=%s prompt_id=%s", st.workflow_key, record_id, prompt_id)
+            else:
+                logging.error("_queue_one failed (no prompt_id returned): workflow=%s record_id=%s", st.workflow_key, record_id)
         except Exception as e:
             err = str(e)
+            logging.exception("_queue_one run_workflow exception: workflow=%s record_id=%s err=%s", st.workflow_key, record_id, err)
 
         async with self._lock:
             st2 = self._runs.get(rk)

@@ -1600,7 +1600,7 @@ async def run_workflow(
                     if not related_items:
                         if strict:
                             raise RuntimeError(
-                                "relationPrompt 未匹配到任何关联记录：请检查表A的选择值/record_id 是否能在表B中找到，以及 itemParamMap 的字段名是否存在。"
+                                f"relationPrompt 未匹配到任何关联记录：请检查当前执行的记录(record_id={record_id}) 表A的选择值 是否能在表B中找到，以及 itemParamMap 的字段名是否存在。"
                             )
                     else:
                         if enable_split:
@@ -1624,7 +1624,7 @@ async def run_workflow(
                     if not related_prompts:
                         if strict:
                             raise RuntimeError(
-                                "relationPrompt 未匹配到任何关联提示词：请检查表A的“选择屏数”值是否能在表B的匹配列中找到（例如匹配列=屏类型），以及表B是否存在要拼接的字段（通用总控提示词/专用生图提示词）。"
+                                f"relationPrompt 未匹配到任何关联提示词：请检查当前执行的记录(record_id={record_id}) 表A的“选择屏数”值是否能在表B的匹配列中找到，以及表B是否存在要拼接的字段。"
                             )
                     else:
                         if enable_split:
@@ -2544,7 +2544,7 @@ async def preview_workflow_runs(
                 )
                 if not related_items:
                     if strict:
-                        raise RuntimeError("relationPrompt 未匹配到任何关联记录：请检查表A的选择值/record_id 是否能在表B中找到，以及 itemParamMap 的字段名是否存在。")
+                        raise RuntimeError(f"relationPrompt 未匹配到任何关联记录：请检查当前执行的记录(record_id={record_id}) 表A的选择值 是否能在表B中找到，以及 itemParamMap 的字段名是否存在。")
                 else:
                     if enable_split:
                         split_groups.append((prompt_param, related_items))
@@ -2567,7 +2567,7 @@ async def preview_workflow_runs(
                 if not related_prompts:
                     if strict:
                         raise RuntimeError(
-                            "relationPrompt 未匹配到任何关联提示词：请检查表A的关联字段值是否能在表B的匹配列中找到，以及表B是否存在要拼接的字段。"
+                            f"relationPrompt 未匹配到任何关联提示词：请检查当前执行的记录(record_id={record_id}) 表A的关联字段值是否能在表B的匹配列中找到，以及表B是否存在要拼接的字段。"
                         )
                 else:
                     if enable_split:
@@ -3013,8 +3013,99 @@ async def dispatch(ctx: AppContext, *, name: str, args: dict[str, Any], trigger:
                 else:
                     await _send_text_by_trigger(im, trigger, "无法读取表格，无法执行批量(batch/drain)操作。")
             return
+
+        table_cfg = ctx.bitable_configs.get(table_key) if table_key else None
+        if not table_cfg:
+            if trigger.chat_id:
+                await _send_text_by_trigger(im, trigger, f"缺少 tables 配置：table={table_key}")
+            return
+        if not bitable.mode.write_enabled:
+            if trigger.chat_id:
+                await _send_text_by_trigger(im, trigger, "表格写入被禁用，/drain 需要把“待处理”改成“执行中”才能抢单。")
+            logging.warning(
+                "drain/batch blocked: write disabled: workflow=%s table=%s read_enabled=%s write_enabled=%s",
+                workflow_key,
+                table_key,
+                bool(getattr(bitable.mode, "read_enabled", False)),
+                bool(getattr(bitable.mode, "write_enabled", False)),
+            )
+            return
+        status_field = table_cfg.fields.get("status")
+        queued_value = table_cfg.status_values.get("queued")
+        running_value = table_cfg.status_values.get("running")
+        if not status_field or not queued_value or not running_value:
+            if trigger.chat_id:
+                await _send_text_by_trigger(
+                    im,
+                    trigger,
+                    "表格配置不完整，/drain 无法判断“待处理/执行中”。请检查 tables 里的 status/status_values。",
+                )
+            logging.warning(
+                "drain/batch blocked: missing status config: workflow=%s table=%s status_field=%s queued=%s running=%s",
+                workflow_key,
+                table_key,
+                status_field or "",
+                queued_value or "",
+                running_value or "",
+            )
+            return
+
+        queued_preview: list[str] = []
+        status_samples: list[str] = []
+        try:
+            items = await bitable.search_records(
+                filter_={
+                    "conjunction": "and",
+                    "conditions": [{"field_name": status_field, "operator": "is", "value": [queued_value]}],
+                },
+                page_size=min(max(1, batch), 10),
+            )
+            for it in items:
+                rid = it.get("record_id")
+                if rid:
+                    queued_preview.append(str(rid))
+        except Exception as e:
+            logging.warning("drain/batch preview search failed: workflow=%s table=%s err=%s", workflow_key, table_key, str(e))
+
+        if not queued_preview:
+            try:
+                sample_items = await bitable.search_records(page_size=20)
+                seen: set[str] = set()
+                for it in sample_items:
+                    fields = it.get("fields") if isinstance(it, dict) and isinstance(it.get("fields"), dict) else {}
+                    texts = _collect_display_strings(fields.get(status_field))
+                    for t in texts[:1]:
+                        s = str(t or "").strip()
+                        if s and s not in seen:
+                            seen.add(s)
+                            status_samples.append(s)
+                    if len(status_samples) >= 8:
+                        break
+            except Exception:
+                status_samples = []
+
+        logging.info(
+            "drain/batch precheck: cmd=%s workflow=%s table=%s status_field=%s queued_value=%s running_value=%s queued_preview=%s status_samples=%s batch=%s inflight=%s",
+            name,
+            workflow_key,
+            table_key,
+            status_field,
+            queued_value,
+            running_value,
+            len(queued_preview),
+            status_samples[:8],
+            batch,
+            inflight,
+        )
         if trigger.chat_id:
-            await _send_text_by_trigger(im, trigger, f"已启动队列: {workflow_key} table={table_key}")
+            extra = ""
+            if queued_preview:
+                extra = f"；待处理预览 {len(queued_preview)} 条"
+            else:
+                extra = f"；待处理预览 0 条（状态列={status_field}，待处理值={queued_value}）"
+                if status_samples:
+                    extra = extra + f"；表里状态示例={','.join(status_samples[:6])}"
+            await _send_text_by_trigger(im, trigger, f"已启动队列: {workflow_key} table={table_key}{extra}")
         try:
             await ctx.runner.start(
                 workflow_key=workflow_key,
