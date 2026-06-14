@@ -5,6 +5,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -30,10 +31,14 @@ class ComfyQueued:
 
 
 def _dump_failed_request(response: httpx.Response, payload: dict[str, Any] | None) -> None:
-    """将失败的请求参数和响应写入 temp_downloads 目录"""
+    """将失败的请求参数和响应写入调试 dump 目录。"""
     try:
-        save_dir = os.path.join(os.getcwd(), "temp_downloads")
-        os.makedirs(save_dir, exist_ok=True)
+        root = Path(os.environ.get("BIAOGE_ROOT") or os.getcwd())
+        enabled = str(os.environ.get("SAVE_TASK_REQUEST_PARAMS", "0") or "").strip().lower()
+        if enabled not in ("1", "true", "yes", "y", "on"):
+            return
+        save_dir_path = root / "logs" / "dumps" / "task_requests"
+        save_dir_path.mkdir(parents=True, exist_ok=True)
         body_text = ""
         try:
             ct = str(response.headers.get("content-type") or "").lower()
@@ -55,8 +60,8 @@ def _dump_failed_request(response: httpx.Response, payload: dict[str, Any] | Non
         ts = int(time.time() * 1000)
         wf_name = str(payload.get("workflowName") or payload.get("workflow_name") or "unknown") if payload else "unknown"
         wf_slug = wf_name.replace("/", "_").replace("\\", "_")[:60]
-        dump_path = os.path.join(save_dir, f"comfyui_error_{wf_slug}_{ts}.json")
-        with open(dump_path, "w", encoding="utf-8") as f:
+        dump_path = save_dir_path / f"comfyui_error_{wf_slug}_{ts}.json"
+        with dump_path.open("w", encoding="utf-8") as f:
             json.dump(dump, f, ensure_ascii=False, indent=2, default=str)
         logging.info("ComfyUI request debug dump written to %s", dump_path)
     except Exception:

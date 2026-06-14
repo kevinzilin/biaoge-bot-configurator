@@ -1716,7 +1716,7 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
     bitable = ctx.bitables.get(table_key) if table_key else None
     table_cfg = ctx.bitable_configs.get(table_key) if table_key else None
 
-    dump_dir = os.environ.get("CALLBACK_DUMP_DIR", "").strip()
+    dump_dir = str(getattr(getattr(ctx, "settings", None), "callback_dump_dir", "") or "").strip()
     if dump_dir:
         try:
             os.makedirs(dump_dir, exist_ok=True)
@@ -2294,8 +2294,6 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
             folder_name = _safe_filename(f"{tk}-{wk}")
 
         result_dir = ctx.settings.result_output_dir
-        if not os.path.isabs(result_dir):
-            result_dir = os.path.join(os.getcwd(), result_dir)
         dest_dir = os.path.join(result_dir, folder_name)
         os.makedirs(dest_dir, exist_ok=True)
 

@@ -109,10 +109,12 @@ class QueueRunner:
         threading.Thread(target=self._poller_thread_main, daemon=True).start()
 
     def _poller_thread_main(self) -> None:
-        try:
-            asyncio.run(self._poll_remote_loop())
-        except Exception:
-            pass
+        while True:
+            try:
+                asyncio.run(self._poll_remote_loop())
+            except Exception:
+                logging.exception("poller: remote loop crashed; restarting in 10s")
+                time.sleep(10)
 
     async def _poll_remote_loop(self) -> None:
         while True:

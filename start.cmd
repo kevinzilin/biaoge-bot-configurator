@@ -2,19 +2,20 @@
 setlocal
 cd /d "%~dp0"
 
-if exist ".venv\Scripts\python.exe" goto :run
+set "PYEXE=.venv\Scripts\python.exe"
+if exist "%PYEXE%" goto :run
+
 echo.
 echo Virtual env [.venv] not found. Please run install.cmd first.
 pause
 exit /b 1
 
 :run
-if exist "win_start.py" goto :run_py
-echo.
-echo Missing file: win_start.py
+"%PYEXE%" "scripts\launch.py" --interactive
+set "ERR=%ERRORLEVEL%"
+if not "%ERR%"=="0" (
+    echo.
+    echo Startup failed with exit code %ERR%.
+)
 pause
-exit /b 1
-
-:run_py
-".venv\Scripts\python.exe" "win_start.py"
-pause
+exit /b %ERR%

@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>biaoge 配置</title>
+  <link rel="stylesheet" href="/admin/static/admin.css?v={{ASSET_VERSION}}" />
+</head>
+<body>
+  <div class="app">
+    <div class="card">
+      <div class="top">
+        <h1>biaoge 配置台</h1>
+        <input id="token" type="text" placeholder="ADMIN_TOKEN（可从 URL ?token= 自动读取）" />
+        <button id="btnReloadAll" class="btnGhost">重新拉取</button>
+        <button id="btnSaveAll">保存并重载</button>
+        <span id="status" class="muted"></span>
+      </div>
+      <div class="help">说明：密钥类参数不会展示在页面；页面只提供表单化编辑，避免直接改 JSON 造成格式错误。</div>
+    </div>
+
+    <div class="layout">
+      <div class="card side">
+        <div class="sideTitle">
+          <h2>.env</h2>
+          <span class="muted" id="envCount"></span>
+        </div>
+        <div id="envList" class="sideList"></div>
+
+        <div class="sideTitle" style="margin-top:14px">
+          <h2>global</h2>
+        </div>
+        <div id="globalList" class="sideList"></div>
+
+        <div class="sideTitle bitableOnly" id="tablesTitle" style="margin-top:14px">
+          <h2>tables</h2>
+          <button id="btnAddTable" class="btnGhost">新增</button>
+        </div>
+        <div id="tableList" class="sideList bitableOnly"></div>
+
+        <div class="sideTitle" style="margin-top:14px">
+          <h2>workflows</h2>
+          <button id="btnAddWorkflow" class="btnGhost">新增</button>
+        </div>
+        <div id="wfPath" class="muted" style="margin:-6px 0 8px 2px; font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"></div>
+        <div id="workflowList" class="sideList"></div>
+      </div>
+
+      <div class="card main">
+        <div id="editor"></div>
+      </div>
+    </div>
+  </div>
+
+<script src="/admin/static/admin.js?v={{ASSET_VERSION}}"></script>
+</body>
+</html>

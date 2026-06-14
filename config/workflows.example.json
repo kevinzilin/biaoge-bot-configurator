@@ -95,7 +95,7 @@
     "klein_add_real_details": {
       "_说明": "本地 ComfyUI + 单表绑定。不拆分，一次触发只跑一条记录。writeBackFields.output 支持两种格式：(1) 字符串 -> 所有产出写入同一列；(2) 对象 {image,video,audio,text} -> 按类型分流到不同列，缺失的列自动创建。",
       "workflowName": "klein添加真实细节",
-      "apiWorkflowPath": "d:\\\\www\\\\biaoge\\\\klein添加真实细节.json",
+      "apiWorkflowPath": "${BIAOGE_ROOT}/workflows/klein添加真实细节.json",
       "comfyuiBaseUrl": "http://127.0.0.1:8188",
       "table": "klein_table",
       "recordFields": {
@@ -380,7 +380,7 @@
     "comfyui_simple_local": {
       "_说明": "纯本地 ComfyUI，不绑定表格。通过 /run workflow=comfyui_simple_local 或飞书消息触发，结果直接发回聊天。",
       "workflowName": "纯本地工作流",
-      "apiWorkflowPath": "d:\\\\www\\\\biaoge\\\\my_workflow.json",
+      "apiWorkflowPath": "${BIAOGE_ROOT}/workflows/my_workflow.json",
       "comfyuiBaseUrl": "http://127.0.0.1:8188",
       "params": {
         "prompt": {
@@ -402,7 +402,7 @@
     "comfyui_remote": {
       "_说明": "远程/私有云 ComfyUI，不绑定表格。comfyuiBaseUrl 指向远程地址。",
       "workflowName": "远程ComfyUI",
-      "apiWorkflowPath": "d:\\\\www\\\\biaoge\\\\my_workflow.json",
+      "apiWorkflowPath": "${BIAOGE_ROOT}/workflows/my_workflow.json",
       "comfyuiBaseUrl": "http://<your-private-comfyui-host>:7001",
       "params": {
         "prompt": {

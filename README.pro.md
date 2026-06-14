@@ -20,8 +20,8 @@
 参数写法（很重要）：
 
 - 统一用“空格分隔”的 `key=value`（例如 `seed=1 steps=30`）
-- 如果值里有空格，用引号包起来（现在支持）：例如 `prompt="hello world"`、`images="@E:\pics\my a.jpg"`
-- 如果你想让机器人“先上传本机文件再执行”，在值前面加 `@`：例如 `images=@E:\pics\a.jpg`
+- 如果值里有空格，用引号包起来（现在支持）：例如 `prompt="hello world"`、`images="@./pics/my a.jpg"`
+- 如果你想让机器人“先上传本机文件再执行”，在值前面加 `@`：例如 `images=@./pics/a.jpg`
 
 基础指令：
 
@@ -46,7 +46,7 @@
   示例：`/wf klein_add_real_details record=recxxxx seed=1 steps=30 prompt=hello`  
   示例：`/wf klein_add_real_details row=6 view=vewxxxx`  
   示例：`/wf klein_add_real_details 3.seed=1 10.text=hello`  
-  示例：`/wf klein_add_real_details images="@E:\pics\my a.jpg" prompt="hello world"`
+  示例：`/wf klein_add_real_details images="@./pics/my a.jpg" prompt="hello world"`
 
 队列/跑批（需要表格配置与授权可用）：
 
@@ -96,7 +96,7 @@
 - 示例（直接指定参数）：
   - `/wf klein_add_real_details prompt="hello world"`
 - 示例（带附件：先上传本机文件再执行）：
-  - `/wf klein_add_real_details images="@E:\pics\my a.jpg" prompt="hello world"`
+  - `/wf klein_add_real_details images="@./pics/my a.jpg" prompt="hello world"`
 - 注意：
   - 因为不读表格，不会自动下载表格附件；你需要通过指令直传参数
   - 附件输入推荐用 `@本机路径`：机器人会先上传（ComfyUI/RunningHub）再替换为执行端识别的文件名

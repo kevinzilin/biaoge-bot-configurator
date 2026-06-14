@@ -22,11 +22,12 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
 from .callback_server import create_callback_app
 from .commands import parse_message_text
 from .comfyui import ComfyUIClient
-from .config import load_json_with_env, load_settings
+from .config import load_json_with_env, load_settings, normalize_config_paths, project_root
 from .context import AppContext
 from .dispatcher import TriggerContext, dispatch, dispatch_in_thread
 from .feishu_auth import FeishuAuth
 from .license_guard import check_license
+from .logging_setup import DailyFileHandler
 from .modules.bitable_logic import subscribe_bitable_files
 from .modules.bitable_trigger import (
     extract_event_type as _enc_extract_bitable_event_type,
@@ -409,12 +410,13 @@ def build_context(env_file: str | None = None) -> AppContext:
             raise RuntimeError(f"WORKFLOW_CONFIG_PATH not found: {settings.workflow_config_path}")
         cfg = load_json_with_env(p)
     else:
-        root = Path(__file__).resolve().parent.parent
+        root = project_root()
         p = root / "config" / "workflows.local.json"
         if p.exists():
             cfg = load_json_with_env(p)
         else:
             cfg = {}
+    cfg = normalize_config_paths(cfg, root=settings.project_root)
     auth = FeishuAuth(settings.feishu_app_id, settings.feishu_app_secret)
     if settings.bitable_mode == "auto":
         tables, default_table_key = _parse_tables(settings, cfg)
@@ -881,7 +883,20 @@ def main() -> None:
             print("")
             print("请检查 .env 中的配置是否正确，或运行 start.cmd 重新交互式配置。")
         raise SystemExit(1)
-    logging.basicConfig(level=getattr(logging, ctx.settings.bot_log_level.upper(), logging.INFO))
+    log_level = getattr(logging, ctx.settings.bot_log_level.upper(), logging.INFO)
+    log_dir = Path(ctx.settings.project_root) / "logs"
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        handlers: list[logging.Handler] = [logging.StreamHandler()]
+        if os.environ.get("BIAOGE_SUPERVISOR_CAPTURE", "").strip() != "1":
+            handlers.append(DailyFileHandler(ctx.settings.project_root))
+    except Exception:
+        handlers = [logging.StreamHandler()]
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s %(levelname)s %(threadName)s %(name)s: %(message)s",
+        handlers=handlers,
+    )
     try:
         ctx.runner.set_context(ctx)
     except Exception:
@@ -957,8 +972,19 @@ def main() -> None:
 
     event_handler = _DebugWsEventHandler(builder.build())
 
-    cli = lark.ws.Client(ctx.settings.feishu_app_id, ctx.settings.feishu_app_secret, event_handler=event_handler, log_level=lark.LogLevel.INFO)
-    cli.start()
+    delay = 5
+    while True:
+        try:
+            logging.info("feishu socket client starting")
+            cli = lark.ws.Client(ctx.settings.feishu_app_id, ctx.settings.feishu_app_secret, event_handler=event_handler, log_level=lark.LogLevel.INFO)
+            cli.start()
+            logging.warning("feishu socket client returned; restarting in %ss", delay)
+        except KeyboardInterrupt:
+            raise
+        except Exception:
+            logging.exception("feishu socket client crashed; restarting in %ss", delay)
+        time.sleep(delay)
+        delay = min(delay * 2, 60)
 
 
 if __name__ == "__main__":

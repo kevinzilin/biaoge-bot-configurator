@@ -17,7 +17,13 @@
 1) 安装依赖
 
 ```bash
-pip install -r requirements.txt
+# Windows
+install.cmd
+# 或
+powershell -ExecutionPolicy Bypass -File win_install.ps1
+
+# macOS / Linux
+bash install.sh
 ```
 
 2) 配置 `.env`
@@ -46,16 +52,91 @@ RunningHub（可选）：
 3) 启动
 
 ```bash
-python -m biaoge_bot.main
+# Windows
+start.cmd
+# 或
+powershell -ExecutionPolicy Bypass -File win_start.ps1
+
+# macOS / Linux
+bash start.sh
 ```
+
+## 跨平台路径与常驻运行
+
+路径配置支持相对项目根目录、绝对路径、`~` 和 `${BIAOGE_ROOT}`。推荐在 `.env` 和 `config/workflows.local.json` 中使用正斜杠 `/`，例如：
+
+```env
+WORKFLOW_CONFIG_PATH=config/workflows.local.json
+RESULT_OUTPUT_DIR=output
+CALLBACK_DUMP_ENABLED=0
+SAVE_TASK_REQUEST_PARAMS=0
+```
+
+所有平台脚本统一为“薄壳脚本 + Python 核心”：
+
+```bash
+scripts/bootstrap.py  # 安装：创建 .env、.venv、安装 requirements.txt
+scripts/preflight.py  # 预检：修复路径、检查端口、补齐必要配置
+scripts/launch.py     # 启动：先预检，再进入 supervisor
+```
+
+手动启动脚本都会调用 `scripts/launch.py --interactive`，缺少 `FEISHU_APP_ID` / `FEISHU_APP_SECRET` 时会提示输入，缺少 `ADMIN_TOKEN` 时会自动生成。
+
+`scripts/supervisor.py` 是唯一守护入口，负责异常重启、日志、防重复启动、防睡眠；通常不需要手动直接调用。
+
+启用开机启动会注册 `scripts/launch.py --non-interactive`。非交互模式下如果关键配置缺失，会写出错误并退出，避免开机任务卡在输入提示。
+
+```bash
+# Windows
+powershell -ExecutionPolicy Bypass -File scripts/enable_autostart.ps1 -Mode Logon
+
+# macOS
+bash scripts/enable_autostart_macos.sh
+
+# Linux
+bash scripts/enable_autostart_linux.sh
+```
+
+启用自启脚本只注册开机启动，不安装依赖，也不会默认立刻启动当前进程。需要注册后立即启动时：
+
+```bash
+# Windows
+powershell -ExecutionPolicy Bypass -File scripts/enable_autostart.ps1 -Mode Logon -RunNow
+
+# macOS
+bash scripts/enable_autostart_macos.sh --now
+
+# Linux
+bash scripts/enable_autostart_linux.sh --now
+```
+
+运行日志统一写入：
+
+```text
+logs/biaoge_bot-YYYY-MM-DD.log
+```
+
+手动启动时，日志会同时显示在当前命令行窗口和当天日志文件。开机启动/后台启动时，主要查看当天日志文件，例如 `logs/biaoge_bot-2026-06-14.log`。
+
+macOS 的 LaunchAgent 还会额外写入 `logs/launchd.out.log` / `logs/launchd.err.log`；Linux systemd 也可以用 `journalctl --user -u biaoge-bot.service -f` 查看服务日志。
+
+调试 dump 和运行日志分开管理：
+
+```env
+BOT_LOG_LEVEL=INFO
+CALLBACK_DUMP_ENABLED=0
+SAVE_TASK_REQUEST_PARAMS=0
+```
+
+`BOT_LOG_LEVEL` 只控制运行日志级别；`CALLBACK_DUMP_ENABLED=1` 会保存回调 payload 到 `logs/dumps/callbacks`；`SAVE_TASK_REQUEST_PARAMS=1` 会保存任务请求参数到 `logs/dumps/task_requests`。两个 dump 开关建议只在排查问题时临时开启。
 
 ## 指令
 
 参数写法（很重要）：
 
 - 统一用“空格分隔”的 `key=value`（例如 `seed=1 steps=30`）
-- 如果值里有空格，用引号包起来（现在支持）：例如 `prompt="hello world"`、`images="@E:\pics\my a.jpg"`
-- 如果你想让机器人“先上传本机文件再执行”，在值前面加 `@`：例如 `images=@E:\pics\a.jpg`
+- 如果值里有空格，用引号包起来（现在支持）：例如 `prompt="hello world"`、`images="@./pics/my a.jpg"`
+- 如果你想让机器人“先上传本机文件再执行”，在值前面加 `@`：例如 `images=@./pics/a.jpg`
 
 - `/help`：查看帮助  
   示例：`/help`
