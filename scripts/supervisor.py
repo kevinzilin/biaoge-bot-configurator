@@ -19,6 +19,7 @@ from biaoge_bot.logging_setup import append_runtime_log, daily_log_path
 LOG_DIR = ROOT / "logs"
 LOCK_PATH = LOG_DIR / "runtime" / "biaoge_bot.supervisor.pid"
 LEGACY_LOCK_PATH = ROOT / "tmp" / "biaoge_bot.supervisor.pid"
+_ACTIVE_LOCK_PATH = LOCK_PATH
 
 
 def _venv_python() -> Path:
@@ -47,6 +48,7 @@ def _pid_exists(pid: int) -> bool:
 
 
 def _acquire_lock() -> int:
+    global _ACTIVE_LOCK_PATH
     LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
     if LEGACY_LOCK_PATH.exists():
         try:
@@ -70,7 +72,17 @@ def _acquire_lock() -> int:
             LOCK_PATH.unlink()
         except Exception:
             pass
-    fd = os.open(str(LOCK_PATH), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    try:
+        fd = os.open(str(LOCK_PATH), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        try:
+            old_pid = int(LOCK_PATH.read_text(encoding="utf-8").strip() or "0")
+        except Exception:
+            old_pid = 0
+        if _pid_exists(old_pid):
+            raise SystemExit(f"supervisor already running: pid={old_pid}")
+        fd = os.open(str(LOCK_PATH), os.O_WRONLY | os.O_TRUNC)
+    _ACTIVE_LOCK_PATH = LOCK_PATH
     os.write(fd, str(os.getpid()).encode("utf-8"))
     return fd
 
@@ -81,8 +93,8 @@ def _release_lock(fd: int) -> None:
     except Exception:
         pass
     try:
-        if LOCK_PATH.read_text(encoding="utf-8").strip() == str(os.getpid()):
-            LOCK_PATH.unlink()
+        if _ACTIVE_LOCK_PATH.read_text(encoding="utf-8").strip() == str(os.getpid()):
+            _ACTIVE_LOCK_PATH.unlink()
     except Exception:
         pass
 

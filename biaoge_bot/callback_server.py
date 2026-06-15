@@ -9,7 +9,7 @@ import shutil
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 from urllib.parse import urlencode
 
 import httpx
@@ -24,6 +24,7 @@ from .modules.bitable_writeback import (
     update_split_progress_and_maybe_finalize as _enc_update_split_progress_and_maybe_finalize,
     write_back_record as _enc_write_back_record,
 )
+from .ports import ctx_bitable_event_enabled, ctx_bitable_input_read_enabled
 
 _DONE_NOTIFIED: dict[str, float] = {}
 _DONE_NOTIFIED_LOCK = asyncio.Lock()
@@ -125,7 +126,14 @@ def _bitable_status_snapshot(ctx: AppContext) -> dict[str, Any]:
     keys = sorted([str(k) for k in (getattr(ctx, "bitables", None) or {}).keys() if k])
     cfg_keys = sorted([str(k) for k in (getattr(ctx, "bitable_configs", None) or {}).keys() if k])
     default_key = str(getattr(ctx, "default_table_key", "") or "")
-    return {"mode": mode_obj, "default_table_key": default_key, "bitable_keys": keys, "configured_table_keys": cfg_keys}
+    return {
+        "mode": mode_obj,
+        "input_read_enabled": ctx_bitable_input_read_enabled(ctx),
+        "event_enabled": ctx_bitable_event_enabled(ctx),
+        "default_table_key": default_key,
+        "bitable_keys": keys,
+        "configured_table_keys": cfg_keys,
+    }
 
 
 def _extract_callback_context(payload: dict[str, Any]) -> dict[str, Any]:
@@ -307,6 +315,21 @@ def _classify_output_type(item: dict[str, Any], bucket_key: str | None = None) -
     if ext:
         return _classify_extension(ext)
     return "image"
+
+
+def _filename_from_url(url: str) -> str:
+    u = str(url or "").strip()
+    if not u:
+        return ""
+    try:
+        p = urlparse(u)
+        qs = parse_qs(p.query or "")
+        q_name = (qs.get("filename") or [""])[0]
+        if isinstance(q_name, str) and q_name.strip():
+            return unquote(q_name.strip())
+        return unquote((p.path or "").rstrip("/").split("/")[-1])
+    except Exception:
+        return ""
 
 
 _OUTPUT_BUCKET_KEYS = ("images", "gifs", "videos", "text", "files")
@@ -494,12 +517,7 @@ async def _download_from_url(ctx: AppContext, *, url: str, prompt_id: str | None
     os.makedirs(save_dir, exist_ok=True)
     name = (filename or "").strip()
     if not name:
-        try:
-            p = urlparse(u)
-            base = unquote((p.path or "").rstrip("/").split("/")[-1])
-            name = base
-        except Exception:
-            name = ""
+        name = _filename_from_url(u)
     if not name:
         name = "output"
     name = _safe_filename(name)
@@ -1023,7 +1041,7 @@ def create_callback_app(ctx: AppContext) -> FastAPI:
             record_id = None
             table_key = ctx.default_table_key
             bitable = ctx.bitables.get(table_key) if table_key else None
-            if bitable and bitable.mode.read_enabled:
+            if bitable and bitable.mode.read_enabled and ctx_bitable_input_read_enabled(ctx):
                 record_id = await bitable.find_next_queued_record_id()
                 
             workflow_key = "default"
@@ -1087,7 +1105,7 @@ def create_callback_app(ctx: AppContext) -> FastAPI:
                         
             if not record_id and not row:
                 bitable = ctx.bitables.get(resolved_table_key) if resolved_table_key else None
-                if bitable and bitable.mode.read_enabled:
+                if bitable and bitable.mode.read_enabled and ctx_bitable_input_read_enabled(ctx):
                     record_id = await bitable.find_next_queued_record_id()
             if not record_id and row:
                 bitable = ctx.bitables.get(resolved_table_key) if resolved_table_key else None
@@ -1152,7 +1170,7 @@ def create_callback_app(ctx: AppContext) -> FastAPI:
             inflight = int(str(args.get("inflight") or "1"))
             
             bitable = ctx.bitables.get(table_key)
-            if bitable is None or not bitable.mode.read_enabled:
+            if bitable is None or not bitable.mode.read_enabled or not ctx_bitable_input_read_enabled(ctx):
                 err_msg = "无法读取表格，无法执行批量(batch/drain)操作。"
                 return {"ok": False, "error": err_msg}
             table_cfg = ctx.bitable_configs.get(table_key)
@@ -1827,7 +1845,8 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
     writeback_errors: list[str] = []
     runlog_file_tokens: list[dict[str, Any]] = []
 
-    need_send_media = bool(isinstance(chat_id, str) and chat_id and not record_id)
+    send_result_to_chat_enabled = bool(getattr(ctx.settings, "feishu_send_result_to_chat", False))
+    need_send_media = bool(isinstance(chat_id, str) and chat_id and (not record_id or send_result_to_chat_enabled))
     if (write_back_enabled and bitable and table_cfg and bitable.mode.write_enabled and ctx.drive) or need_send_media:
         output_items = _iter_output_items(payload, output_node_ids=output_node_ids)
         text_items_debug = [it for it in output_items if (isinstance(it, dict) and it.get("_bucket") == "text")]
@@ -1901,6 +1920,43 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
                 except Exception:
                     saved = None
                 if saved and _is_file_path(saved):
+                    file_paths.append({"path": saved, "type": otype})
+
+        if need_send_media and result_urls:
+            existing_paths: set[str] = set()
+            for entry in file_paths:
+                fp0 = entry.get("path") if isinstance(entry, dict) else entry
+                if isinstance(fp0, str) and fp0:
+                    try:
+                        existing_paths.add(os.path.normcase(os.path.abspath(fp0)))
+                    except Exception:
+                        existing_paths.add(fp0)
+            type_by_url: dict[str, str] = {}
+            for otype, urls in (typed_result_urls or {}).items():
+                if not isinstance(urls, list):
+                    continue
+                for url in urls:
+                    if isinstance(url, str) and url.strip():
+                        type_by_url[url.strip()] = str(otype)
+            for url0 in result_urls:
+                url = str(url0 or "").strip()
+                if not _is_http_url(url):
+                    continue
+                fname = _filename_from_url(url)
+                otype = type_by_url.get(url) or _classify_extension(Path(fname).suffix)
+                try:
+                    saved = await _download_from_url(ctx, url=url, prompt_id=prompt_id, filename=fname or None)
+                except Exception as e:
+                    logging.warning("download result_url for chat failed: prompt_id=%s url=%s err=%s", prompt_id, url, e)
+                    saved = None
+                if saved and _is_file_path(saved):
+                    try:
+                        saved_key = os.path.normcase(os.path.abspath(saved))
+                    except Exception:
+                        saved_key = saved
+                    if saved_key in existing_paths:
+                        continue
+                    existing_paths.add(saved_key)
                     file_paths.append({"path": saved, "type": otype})
 
     if not file_paths:
@@ -2160,7 +2216,10 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
         im = IMClient(ctx.auth)
         rid0 = str(record_id or "").strip()
         split_group = str((cb_ctx or {}).get("split_group") or "").strip() if isinstance(cb_ctx, dict) else ""
-        if rid0 and not rid0.startswith("mock_rec_"):
+        has_real_record = bool(rid0 and not rid0.startswith("mock_rec_"))
+        should_send_result_payload = bool((file_paths or result_urls) and (not has_real_record or send_result_to_chat_enabled))
+        sent_status_text = False
+        if has_real_record:
             if split_group:
                 idx0 = (cb_ctx or {}).get("split_index") if isinstance(cb_ctx, dict) else None
                 idx = int(idx0) if isinstance(idx0, int) else (int(str(idx0)) if str(idx0).strip().isdigit() else 0)
@@ -2192,6 +2251,7 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
                             tip = tip[:200] + "..."
                         msg_lines.append(f"回写提示：{tip}")
                 await _notify_text(im, "\n".join([x for x in msg_lines if x]))
+                sent_status_text = True
 
                 if isinstance(split_summary, dict) and bool(split_summary.get("final")):
                     total2 = int(split_summary.get("total") or 0)
@@ -2201,7 +2261,8 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
                     await _notify_text(im, f"批次完成 record={record_id}：成功{succ2}，失败{failed2}，共{total2}")
             else:
                 await _notify_text(im, ("已完成" if ok else "失败") + f" record={record_id}")
-        elif file_paths:
+                sent_status_text = True
+        if should_send_result_payload and file_paths:
             sent_any = False
             last_send_err: str | None = None
 
@@ -2211,25 +2272,34 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
                 size = os.path.getsize(fp) if fp and os.path.exists(fp) else 0
                 if size <= 0:
                     raise RuntimeError("file not found or empty")
-                if not target_chat_id:
+                if not target_chat_id and not target_open_id:
                     return False
                 if ext == "mp4" and size <= 30 * 1024 * 1024:
                     try:
                         k = await im.upload_video_message(file_path=fp, duration_ms=None)
-                        await im.send_media(chat_id=target_chat_id, file_key=k)
+                        if target_chat_id:
+                            await im.send_media(chat_id=target_chat_id, file_key=k)
+                        else:
+                            await im.send_media_to_open_id(open_id=target_open_id, file_key=k)
                         return True
                     except Exception as e:
                         last_send_err = str(e)
                 if ext in {"png", "jpg", "jpeg", "webp", "gif", "bmp"} and size <= 10 * 1024 * 1024:
                     try:
                         k = await im.upload_image_message(file_path=fp)
-                        await im.send_image(chat_id=target_chat_id, image_key=k)
+                        if target_chat_id:
+                            await im.send_image(chat_id=target_chat_id, image_key=k)
+                        else:
+                            await im.send_image_to_open_id(open_id=target_open_id, image_key=k)
                         return True
                     except Exception as e:
                         last_send_err = str(e)
                 if size <= 30 * 1024 * 1024:
                     k = await im.upload_file_message(file_path=fp)
-                    await im.send_file(chat_id=target_chat_id, file_key=k)
+                    if target_chat_id:
+                        await im.send_file(chat_id=target_chat_id, file_key=k)
+                    else:
+                        await im.send_file_to_open_id(open_id=target_open_id, file_key=k)
                     return True
                 raise RuntimeError("file too large to upload via im api")
 
@@ -2246,17 +2316,19 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
                     lines = list(result_urls)
                     if last_send_err:
                         lines.append(f"（补充：发送预览失败，原因：{last_send_err}）")
+                    else:
+                        lines.append("（补充：未能生成可上传到飞书的本地预览文件，已改发链接）")
                     await _notify_text(im, "\n".join(lines))
                 else:
                     text0 = ("已完成" if ok else "失败") + (f" prompt={prompt_id}" if prompt_id else "")
                     if last_send_err:
                         text0 = text0 + f"\n（补充：发送预览失败，原因：{last_send_err}）"
                     await _notify_text(im, text0)
-        elif result_urls:
+        elif should_send_result_payload and result_urls:
             lines = [("已完成" if ok else "失败") + (f" prompt={prompt_id}" if prompt_id else "")]
             lines.extend(result_urls)
             await _notify_text(im, "\n".join(lines))
-        elif prompt_id:
+        elif not sent_status_text and prompt_id:
             await _notify_text(im, ("已完成" if ok else "失败") + f" prompt={prompt_id}")
 
     # 如果配置了结果输出目录，从临时目录复制结果

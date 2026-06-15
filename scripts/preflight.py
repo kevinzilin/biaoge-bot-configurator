@@ -65,26 +65,26 @@ def read_dotenv(path: Path = ENV_PATH) -> dict[str, str]:
     env_map: dict[str, str] = {}
     if not path.exists():
         return env_map
-    for raw_line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+    for raw_line in path.read_text(encoding="utf-8-sig", errors="ignore").splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        key = key.strip()
+        key = key.strip().lstrip("\ufeff")
         if key:
             env_map[key] = value.strip()
     return env_map
 
 
 def update_dotenv(updates: dict[str, str], path: Path = ENV_PATH) -> None:
-    lines = path.read_text(encoding="utf-8", errors="ignore").splitlines() if path.exists() else []
+    lines = path.read_text(encoding="utf-8-sig", errors="ignore").splitlines() if path.exists() else []
     existing: set[str] = set()
     out: list[str] = []
 
     for line in lines:
         stripped = line.strip()
         if stripped and not stripped.startswith("#") and "=" in line:
-            key = line.split("=", 1)[0].strip()
+            key = line.split("=", 1)[0].strip().lstrip("\ufeff")
             if key in updates:
                 out.append(f"{key}={updates[key]}")
                 existing.add(key)

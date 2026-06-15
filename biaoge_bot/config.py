@@ -94,6 +94,7 @@ class Settings:
     remote_callback_url: str | None
     cb_message_token: str | None
     runninghub_api_key: str | None
+    feishu_send_result_to_chat: bool
     remote_result_mode: str
     remote_poll_interval_seconds: int
     remote_poll_fallback_seconds: int
@@ -162,6 +163,7 @@ def load_settings(env_path: str | None = None) -> Settings:
         remote_callback_url=(os.environ.get("REMOTE_CALLBACK_URL", "").strip() or None),
         cb_message_token=(os.environ.get("CB_MESSAGE_TOKEN", "").strip() or None),
         runninghub_api_key=(os.environ.get("RUNNINGHUB_API_KEY", "").strip() or None),
+        feishu_send_result_to_chat=to_bool(os.environ.get("FEISHU_SEND_RESULT_TO_CHAT", "0")),
         remote_result_mode=os.environ.get("REMOTE_RESULT_MODE", "poll").strip().lower() or "poll",
         remote_poll_interval_seconds=max(10, to_int(os.environ.get("REMOTE_POLL_INTERVAL_SECONDS", "60"), 60)),
         remote_poll_fallback_seconds=max(0, to_int(os.environ.get("REMOTE_POLL_FALLBACK_SECONDS", "600"), 600)),

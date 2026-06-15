@@ -15,64 +15,14 @@ import uvicorn
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from biaoge_bot.callback_server import create_callback_app
-from biaoge_bot.comfyui import ComfyUIClient
-from biaoge_bot.config import load_json_with_env, load_settings
 from biaoge_bot.context import AppContext
-from biaoge_bot.feishu_auth import FeishuAuth
-from biaoge_bot.main import _parse_bitable_mode, _parse_tables
-from biaoge_bot.ports import BitableMode
-from biaoge_bot.queue_runner import QueueRunner
-from biaoge_bot.workflows import WorkflowRegistry
+from biaoge_bot.main import build_context as _main_build_context
 
 
 def _build_context(*, env_file: str | None, workflow_config_path: str | None) -> AppContext:
     if workflow_config_path:
         os.environ["WORKFLOW_CONFIG_PATH"] = workflow_config_path
-
-    settings = load_settings(env_file)
-    if settings.workflow_config_path:
-        p = Path(settings.workflow_config_path)
-        if not p.exists():
-            raise RuntimeError(f"WORKFLOW_CONFIG_PATH not found: {settings.workflow_config_path}")
-        cfg = load_json_with_env(p)
-    else:
-        cfg = {}
-
-    auth = FeishuAuth(settings.feishu_app_id, settings.feishu_app_secret)
-
-    if settings.bitable_mode == "auto":
-        tables, default_table_key = _parse_tables(settings, cfg)
-        bitable_mode = BitableMode(read_enabled=bool(tables), write_enabled=bool(tables))
-    else:
-        tables, default_table_key = _parse_tables(settings, cfg)
-        bitable_mode = _parse_bitable_mode(settings.bitable_mode)
-
-    drive = None
-    bitables: dict[str, Any] = {}
-    if tables and (bitable_mode.read_enabled or bitable_mode.write_enabled):
-        from biaoge_bot.modules.bitable import BitableClient
-        from biaoge_bot.modules.drive import DriveClient
-
-        for key, table_cfg in tables.items():
-            bitables[key] = BitableClient(auth, table_cfg, bitable_mode)
-        drive = DriveClient(auth)
-
-    comfyui = ComfyUIClient(settings.comfyui_base_url)
-    workflows = WorkflowRegistry.from_config(cfg)
-    runner = QueueRunner()
-    ctx = AppContext(
-        settings=settings,
-        config=cfg,
-        auth=auth,
-        bitables=bitables,
-        drive=drive,
-        comfyui=comfyui,
-        workflows=workflows,
-        bitable_mode=bitable_mode,
-        bitable_configs=tables,
-        default_table_key=default_table_key,
-        runner=runner,
-    )
+    ctx = _main_build_context(env_file)
     if hasattr(ctx.runner, "set_context"):
         ctx.runner.set_context(ctx)
     return ctx

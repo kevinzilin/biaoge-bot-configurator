@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
+
+
+_TASK_QUEUE_MAXED = "TASK_QUEUE_MAXED"
+_DEFAULT_TASK_QUEUE_MAXED_RETRIES = 5
+_DEFAULT_TASK_QUEUE_RETRY_DELAY_SECONDS = 15.0
+_MAX_TASK_QUEUE_RETRY_DELAY_SECONDS = 60.0
 
 
 def _strip_ticks(s: str) -> str:
@@ -12,6 +20,34 @@ def _strip_ticks(s: str) -> str:
     if v.startswith("`") and v.endswith("`") and len(v) >= 2:
         v = v[1:-1].strip()
     return v
+
+
+def _runninghub_code(obj: dict[str, Any]) -> int | None:
+    code = obj.get("code")
+    if isinstance(code, int):
+        return code
+    if isinstance(code, str):
+        s = code.strip()
+        if s:
+            try:
+                return int(s)
+            except ValueError:
+                return None
+    return None
+
+
+def _is_task_queue_maxed(obj: dict[str, Any]) -> bool:
+    return _runninghub_code(obj) == 421
+
+
+def _runninghub_error_message(obj: dict[str, Any]) -> str:
+    for source in (obj, obj.get("data") if isinstance(obj.get("data"), dict) else {}):
+        for key in ("message", "msg", "errorMessage", "errorCode", "code"):
+            v = source.get(key)
+            if v is not None and str(v).strip():
+                return str(v).strip()
+    return f"runninghub error: {obj}"
+
 
 @dataclass(frozen=True)
 class RunningHubCreated:
@@ -55,6 +91,8 @@ class RunningHubClient:
         use_personal_queue: bool | None = None,
         retain_seconds: int | None = None,
         access_password: str | None = None,
+        task_queue_maxed_retries: int = _DEFAULT_TASK_QUEUE_MAXED_RETRIES,
+        task_queue_maxed_retry_delay_seconds: float = _DEFAULT_TASK_QUEUE_RETRY_DELAY_SECONDS,
     ) -> RunningHubCreated:
         if not self._api_key:
             raise RuntimeError("missing RUNNINGHUB_API_KEY")
@@ -85,28 +123,50 @@ class RunningHubClient:
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
         }
+        max_retries = max(0, int(task_queue_maxed_retries))
+        retry_delay = max(0.0, float(task_queue_maxed_retry_delay_seconds))
         async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.post(
-                f"{self._base_url}/task/openapi/create",
-                content=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-                headers=headers,
-            )
-            r.raise_for_status()
-            obj = r.json()
-            if not isinstance(obj, dict):
-                raise RuntimeError("runninghub response invalid")
-            code = obj.get("code")
-            if code not in (0, "0", None):
-                raise RuntimeError(str(obj.get("msg") or f"runninghub error: {obj}"))
-            data = obj.get("data") or {}
-            task_id = None
-            if isinstance(data, dict):
-                tid = data.get("taskId")
-                if isinstance(tid, str) and tid.strip():
-                    task_id = tid.strip()
-                elif isinstance(tid, int):
-                    task_id = str(tid)
-            return RunningHubCreated(task_id=task_id, raw=obj)
+            for attempt in range(max_retries + 1):
+                r = await client.post(
+                    f"{self._base_url}/task/openapi/create",
+                    content=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                    headers=headers,
+                )
+                r.raise_for_status()
+                obj = r.json()
+                if not isinstance(obj, dict):
+                    raise RuntimeError("runninghub response invalid")
+                code = _runninghub_code(obj)
+                is_task_queue_maxed = _is_task_queue_maxed(obj)
+                if code != 0:
+                    if is_task_queue_maxed and attempt < max_retries:
+                        sleep_seconds = min(
+                            _MAX_TASK_QUEUE_RETRY_DELAY_SECONDS,
+                            retry_delay * (2 ** attempt) if retry_delay else 0.0,
+                        )
+                        logging.warning(
+                            "runninghub create_task queue maxed, retrying: workflow_id=%s attempt=%s/%s delay=%ss error=%s",
+                            wid,
+                            attempt + 1,
+                            max_retries + 1,
+                            sleep_seconds,
+                            _runninghub_error_message(obj),
+                        )
+                        if sleep_seconds > 0:
+                            await asyncio.sleep(sleep_seconds)
+                        continue
+                    raise RuntimeError(_runninghub_error_message(obj))
+                data = obj.get("data") or {}
+                task_id = None
+                if isinstance(data, dict):
+                    tid = data.get("taskId")
+                    if isinstance(tid, str) and tid.strip():
+                        task_id = tid.strip()
+                    elif isinstance(tid, int):
+                        task_id = str(tid)
+                return RunningHubCreated(task_id=task_id, raw=obj)
+
+        raise RuntimeError("runninghub create_task retry exhausted")
 
     async def query_results_v2(self, *, task_id: str) -> RunningHubQueryV2:
         if not self._api_key:

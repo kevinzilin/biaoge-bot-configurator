@@ -181,6 +181,9 @@ class IMClient:
     async def send_image(self, *, chat_id: str, image_key: str) -> None:
         await self._send_message(receive_id_type="chat_id", receive_id=chat_id, msg_type="image", content={"image_key": image_key})
 
+    async def send_image_to_open_id(self, *, open_id: str, image_key: str) -> None:
+        await self._send_message(receive_id_type="open_id", receive_id=open_id, msg_type="image", content={"image_key": image_key})
+
     async def upload_file_message(self, *, file_path: str) -> str:
         file_type = _guess_file_type(file_path)
         try:
@@ -199,6 +202,9 @@ class IMClient:
     async def send_file(self, *, chat_id: str, file_key: str) -> None:
         await self._send_message(receive_id_type="chat_id", receive_id=chat_id, msg_type="file", content={"file_key": file_key})
 
+    async def send_file_to_open_id(self, *, open_id: str, file_key: str) -> None:
+        await self._send_message(receive_id_type="open_id", receive_id=open_id, msg_type="file", content={"file_key": file_key})
+
     async def send_audio(self, *, chat_id: str, file_key: str) -> None:
         await self._send_message(receive_id_type="chat_id", receive_id=chat_id, msg_type="audio", content={"file_key": file_key})
 
@@ -207,6 +213,12 @@ class IMClient:
         if isinstance(cover_image_key, str) and cover_image_key.strip():
             content["image_key"] = cover_image_key.strip()
         await self._send_message(receive_id_type="chat_id", receive_id=chat_id, msg_type="media", content=content)
+
+    async def send_media_to_open_id(self, *, open_id: str, file_key: str, cover_image_key: str | None = None) -> None:
+        content: dict[str, Any] = {"file_key": file_key}
+        if isinstance(cover_image_key, str) and cover_image_key.strip():
+            content["image_key"] = cover_image_key.strip()
+        await self._send_message(receive_id_type="open_id", receive_id=open_id, msg_type="media", content=content)
 
     async def download_image(self, *, image_key: str, save_path: str, message_id: str | None = None) -> None:
         key = str(image_key or "").strip()

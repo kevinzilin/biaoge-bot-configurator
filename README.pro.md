@@ -4,6 +4,8 @@
 
 如果你只需要 BITABLE_MODE=off 的开源版本，请阅读仓库根目录的 README.md。
 
+受保护模块的源码、编译依赖和 Windows/macOS/Linux 编译步骤见 [docs/protected_modules_build.md](docs/protected_modules_build.md)。
+
 ## 能力概览
 
 - 飞书 Socket Mode 常驻：接收群消息指令与卡片回调事件
@@ -132,8 +134,10 @@
   - `/wf klein_add_real_details row=4 table=prod_table prompt="hello"`
 - 注意：
   - 只写模式下，即使表格里有“提示词/参考图”等字段，也不会被当作输入读取；你仍需要在指令里把参数传全（包括附件用 `@...`）
+  - `row=...` 只用于定位要写回的记录，不会读取该行字段作为任务参数
+  - 只写模式不会订阅或处理多维表格事件触发
   - 如果你执行的是 `/wf <workflow> ...` 或 `/run workflow=... ...`，但既没有传 `table=...`，该 workflow 也没有绑定 `table`，那么这条命令会按“纯参数直跑”处理，不会自动去碰默认表
-  - 如果你明确传了 `table=...`，或者该 workflow 自己绑定了 `table`，但没有提供 `record/row`，程序仍可能从这张表里自动取下一条 queued 记录作为目标
+  - 如果没有提供 `record/row`，程序不会从表格里自动取下一条 queued 记录作为目标
 
 ## 公网转发器（阿里云 FC）配置要点
 
@@ -155,3 +159,8 @@ FC 环境变量（最低）：
 - `/ids`：回显 chat_id 与 user_open_id
 - `/botid`：回显 bot_open_id（用于配置转发器的 FEISHU_AT_USER_ID）
 - `/cb`：公网转发器触发用（正常不需要手动调用）
+
+结果交付开关：
+
+- `FEISHU_SEND_RESULT_TO_CHAT=0`：保持旧行为，仅无表格/无记录的直跑任务会把结果发回对话框
+- `FEISHU_SEND_RESULT_TO_CHAT=1`：绑定表格并回写时，也同步把生成结果发回触发的飞书对话框

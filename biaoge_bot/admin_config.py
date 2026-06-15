@@ -39,6 +39,7 @@ _BOOL_ENV_KEYS = {
     "CALLBACK_DUMP_ENABLED",
     "SAVE_TASK_REQUEST_PARAMS",
     "COMFYUI_UPLOAD_ENABLED",
+    "FEISHU_SEND_RESULT_TO_CHAT",
 }
 _LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR"}
 _ENV_SCHEMA: dict[str, dict[str, Any]] = {
@@ -80,6 +81,13 @@ _ENV_SCHEMA: dict[str, dict[str, Any]] = {
         "default": "0",
         "description": "是否保存任务请求参数、workflow JSON、extra_data 等调试 dump。",
         "readonlyHint": "开启后固定写入 logs/dumps/task_requests。",
+    },
+    "FEISHU_SEND_RESULT_TO_CHAT": {
+        "group": "基础服务",
+        "order": 55,
+        "type": "switch",
+        "default": "0",
+        "description": "绑定表格的任务完成后，是否也把生成结果发送回触发的飞书对话框。",
     },
     "COMFYUI_BASE_URL": {
         "group": "ComfyUI",
@@ -222,18 +230,27 @@ def _normalize_env_value(key: str, value: Any) -> str:
 
 
 def _visible_env_values(values: dict[str, str]) -> dict[str, str]:
+    bitable_mode = str(values.get("BITABLE_MODE") or "").strip().lower()
     visible = {k: v for k, v in values.items() if not _is_sensitive_key(k) and not _is_hidden_env_key(k)}
+    if bitable_mode == "off":
+        visible.pop("FEISHU_SEND_RESULT_TO_CHAT", None)
     for key, meta in _ENV_SCHEMA.items():
         if _is_sensitive_key(key) or _is_hidden_env_key(key):
+            continue
+        if bitable_mode == "off" and key == "FEISHU_SEND_RESULT_TO_CHAT":
             continue
         visible.setdefault(key, str(meta.get("default", "")))
     return visible
 
 
-def _visible_env_schema() -> dict[str, dict[str, Any]]:
+def _visible_env_schema(values: dict[str, str] | None = None) -> dict[str, dict[str, Any]]:
+    values = values or {}
+    bitable_mode = str(values.get("BITABLE_MODE") or "").strip().lower()
     out: dict[str, dict[str, Any]] = {}
     for key, meta in _ENV_SCHEMA.items():
         if _is_sensitive_key(key) or _is_hidden_env_key(key):
+            continue
+        if bitable_mode == "off" and key == "FEISHU_SEND_RESULT_TO_CHAT":
             continue
         out[key] = dict(meta)
     return out
@@ -383,14 +400,14 @@ def register_admin(app: FastAPI, ctx: AppContext) -> None:
         path = _env_path()
         with _LOCK:
             _, values = _read_env_file(path)
-        visible = _visible_env_values(values)
         bitable_mode = str(values.get("BITABLE_MODE") or "").strip().lower()
+        visible = _visible_env_values(values)
         return {
             "values": visible,
             "path": str(path),
             "meta": {
                 "bitable_mode": bitable_mode,
-                "env_schema": _visible_env_schema(),
+                "env_schema": _visible_env_schema(values),
                 "env_group_order": list(_ENV_GROUP_ORDER),
             },
         }

@@ -37,7 +37,7 @@ from .modules.bitable_trigger import (
     resolve_table_key as _enc_resolve_table_key,
     try_trigger_record as _enc_try_trigger_record,
 )
-from .ports import BitableConfig, BitableMode
+from .ports import BitableConfig, BitableMode, ctx_bitable_event_enabled, normalize_bitable_mode_name
 from .queue_runner import QueueRunner
 from .workflows import WorkflowRegistry
 
@@ -105,7 +105,12 @@ def _all_bitable_file_tokens_from_config(ctx: AppContext) -> list[str]:
 
 
 def _warm_bitable_event_subscriptions(ctx: AppContext) -> None:
+    if not ctx_bitable_event_enabled(ctx):
+        return
+
     async def _job() -> None:
+        if not ctx_bitable_event_enabled(ctx):
+            return
         ftokens = _all_bitable_file_tokens_from_config(ctx)
         if not ftokens:
             return
@@ -390,14 +395,17 @@ def _parse_tables(settings: Any, cfg: dict[str, Any]) -> tuple[dict[str, Bitable
 
 
 def _parse_bitable_mode(mode: str) -> BitableMode:
-    m = (mode or "").strip().lower()
-    if m in ("off", "none", "disable", "disabled"):
+    m = normalize_bitable_mode_name(mode)
+    if m == "off":
         return BitableMode(read_enabled=False, write_enabled=False)
-    if m in ("read", "readonly", "ro"):
+    if m == "read":
         return BitableMode(read_enabled=True, write_enabled=False)
-    if m in ("write", "writeonly", "wo"):
+    if m == "write":
+        # write mode still needs minimal reads for locating write-back records
+        # (for example row=...), but business logic must not use record fields
+        # as workflow input parameters.
         return BitableMode(read_enabled=True, write_enabled=True)
-    if m in ("readwrite", "rw", "all", "on", "enable", "enabled"):
+    if m == "readwrite":
         return BitableMode(read_enabled=True, write_enabled=True)
     return BitableMode(read_enabled=True, write_enabled=True)
 
@@ -808,6 +816,8 @@ def do_bitable_record_changed_event_factory(ctx: AppContext):
         return d4 if isinstance(d4, dict) else {}
 
     def handler(data: Any) -> None:
+        if not ctx_bitable_event_enabled(ctx):
+            return
         payload = _normalize_payload(data)
         event_type = _enc_extract_bitable_event_type(payload) or "unknown"
         operator_open_id = _enc_extract_operator_open_id(payload, collect_values_by_key=_collect_values_by_key)
@@ -909,7 +919,8 @@ def main() -> None:
 
     threading.Thread(target=start_callback_server, args=(ctx,), daemon=True).start()
     threading.Thread(target=_warm_bot_open_id, args=(ctx,), daemon=True).start()
-    threading.Thread(target=_warm_bitable_event_subscriptions, args=(ctx,), daemon=True).start()
+    if ctx_bitable_event_enabled(ctx):
+        threading.Thread(target=_warm_bitable_event_subscriptions, args=(ctx,), daemon=True).start()
 
     def _ignore_event(*_: Any, **__: Any) -> None:
         return
@@ -939,27 +950,28 @@ def main() -> None:
                 getattr(builder, "register_p2_customized_event")(et, menu_handler)
             except Exception:
                 pass
-        bitable_handler = do_bitable_record_changed_event_factory(ctx)
-        for et in (
-            "file_bitable_record_changed_v1",
-            "file.bitable_record_changed_v1",
-            "drive.file.bitable_record_changed_v1",
-            "drive.file.bitable_record_changed",
-            "bitable.record.changed_v1",
-            "bitable.record.updated_v1",
-            "bitable.record.created_v1",
-            "bitable.record.deleted_v1",
-            "bitable_record_changed_v1",
-            "bitable.record_changed_v1",
-        ):
-            try:
-                getattr(builder, "register_p2_customized_event")(et, bitable_handler)
-            except Exception:
-                pass
-            try:
-                builder.register_p1_customized_event(et, bitable_handler)
-            except Exception:
-                pass
+        if ctx_bitable_event_enabled(ctx):
+            bitable_handler = do_bitable_record_changed_event_factory(ctx)
+            for et in (
+                "file_bitable_record_changed_v1",
+                "file.bitable_record_changed_v1",
+                "drive.file.bitable_record_changed_v1",
+                "drive.file.bitable_record_changed",
+                "bitable.record.changed_v1",
+                "bitable.record.updated_v1",
+                "bitable.record.created_v1",
+                "bitable.record.deleted_v1",
+                "bitable_record_changed_v1",
+                "bitable.record_changed_v1",
+            ):
+                try:
+                    getattr(builder, "register_p2_customized_event")(et, bitable_handler)
+                except Exception:
+                    pass
+                try:
+                    builder.register_p1_customized_event(et, bitable_handler)
+                except Exception:
+                    pass
     if hasattr(builder, "register_p2_im_message_message_read_v1"):
         getattr(builder, "register_p2_im_message_message_read_v1")(_ignore_event)
     else:

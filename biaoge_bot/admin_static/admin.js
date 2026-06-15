@@ -3,6 +3,7 @@ const ENV_DESC = {
   "BOT_LOG_LEVEL": "日志等级（INFO/DEBUG/WARNING/ERROR）。排查问题时可临时改为 DEBUG。",
   "CALLBACK_DUMP_ENABLED": "是否保存回调 payload 调试 dump（1/0）。开启后统一写入 logs/dumps/callbacks。",
   "SAVE_TASK_REQUEST_PARAMS": "是否保存任务请求参数调试 dump（1/0）。开启后统一写入 logs/dumps/task_requests。",
+  "FEISHU_SEND_RESULT_TO_CHAT": "绑定表格的任务完成后，是否也把生成结果发送回触发的飞书对话框（1/0）。",
   "CALLBACK_HOST": "本机/局域网可访问的监听地址。示例：127.0.0.1（仅本机）或 192.168.x.x（局域网可访问）。",
   "CALLBACK_PORT": "回调服务端口，配置页也是通过该端口访问。",
   "COMFYUI_BASE_URL": "ComfyUI 服务地址（示例：http://127.0.0.1:8188 或远程地址）。",
@@ -956,7 +957,7 @@ function renderEditor() {
             el("div", {class:"field"}, [
               el("div", {class:"label", text:"启用"}),
               triggerEnabled,
-              el("div", {class:"help", text:(mode === "write") ? "BITABLE_MODE=write：无法读表，不支持触发。" : "开启后：当记录状态变为 trigger（默认“触发执行”）时，自动执行所选 workflow。"}),
+              el("div", {class:"help", text:(mode === "write") ? "BITABLE_MODE=write：不会订阅/处理表格事件，不支持触发。" : "开启后：当记录状态变为 trigger（默认“触发执行”）时，自动执行所选 workflow。"}),
             ]),
             el("div", {class:"field"}, [
               el("div", {class:"label", text:"workflow"}),

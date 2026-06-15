@@ -28,6 +28,7 @@ from .modules.bitable_logic import (
     resolve_relation_param_items as _enc_resolve_relation_param_items,
     resolve_relation_prompts as _enc_resolve_relation_prompts,
 )
+from .ports import ctx_bitable_input_read_enabled
 from .runninghub import RunningHubClient
 from .workflows import WorkflowSpec
 
@@ -744,32 +745,6 @@ def _extract_relation_display_keys(value: Any) -> list[str]:
     return [s2] if s2 else []
 
 
-async def _search_one_record_by_field(
-    bitable: Any,
-    *,
-    field_name: str,
-    value: str,
-) -> dict[str, Any] | None:
-    fn = str(field_name or "").strip()
-    vv = str(value or "").strip()
-    if not fn or not vv:
-        return None
-    for op in ("is", "contains"):
-        try:
-            items = await bitable.search_records(
-                filter_={
-                    "conjunction": "and",
-                    "conditions": [{"field_name": fn, "operator": op, "value": [vv]}],
-                },
-                page_size=1,
-            )
-        except Exception:
-            items = []
-        if items:
-            return items[0] if isinstance(items[0], dict) else None
-    return None
-
-
 async def _resolve_relation_prompts(
     ctx: AppContext,
     *,
@@ -795,28 +770,6 @@ async def _resolve_relation_prompts(
         max_items=max_items,
         strict=strict,
     )
-
-
-def _normalize_relation_field_value(value: Any) -> str:
-    items = _collect_display_strings(value)
-    if not items:
-        return ""
-    if len(items) == 1:
-        return str(items[0] or "").strip()
-    return "，".join([str(x or "").strip() for x in items if str(x or "").strip()])
-
-
-def _build_relation_prompt_from_fields(fields: dict[str, Any], prompt_fields: list[str], join_with: str) -> str:
-    if not prompt_fields:
-        return ""
-    parts: list[str] = []
-    for fn in prompt_fields:
-        v = fields.get(fn) if fn else None
-        ss = _collect_display_strings(v)
-        if ss:
-            parts.append(ss[0])
-    j = str(join_with if join_with is not None else "\n")
-    return j.join([x for x in parts if str(x).strip()]).strip()
 
 
 async def _resolve_relation_param_items(
@@ -848,6 +801,40 @@ async def _resolve_relation_param_items(
         max_items=max_items,
         strict=strict,
     )
+
+
+async def _resolve_relation_item_files(
+    ctx: AppContext,
+    *,
+    provider: str,
+    comfyui: ComfyUIClient,
+    runninghub: RunningHubClient | None,
+    wf: WorkflowSpec,
+    items: list[dict[str, Any]],
+    resolve_files: bool,
+) -> list[dict[str, Any]]:
+    if not resolve_files or not items:
+        return items
+    out: list[dict[str, Any]] = []
+    for item in items:
+        current = dict(item)
+        for param_key in list(current.keys()):
+            if param_key.startswith("__") or param_key not in wf.params:
+                continue
+            raw_val = current.get(param_key)
+            downloaded = await _download_attachments(
+                ctx,
+                provider=provider,
+                comfyui=comfyui,
+                runninghub=runninghub,
+                value=raw_val,
+            )
+            value = downloaded if downloaded else raw_val
+            current[param_key] = _normalize_bitable_value_for_param(value, wf, param_key)
+        out.append(current)
+    return out
+
+
 def _runninghub_node_file_value(file_name: str) -> str:
     s = str(file_name or "").strip()
     if not s:
@@ -1421,7 +1408,7 @@ async def run_workflow(
                 break
                 
     if not record_id and not row:
-        if bitable and bitable.mode.read_enabled:
+        if bitable and bitable.mode.read_enabled and ctx_bitable_input_read_enabled(ctx):
             record_id = await bitable.find_next_queued_record_id()
 
     if not record_id and bitable:
@@ -1474,7 +1461,7 @@ async def run_workflow(
         record_id
         and bitable
         and bitable.mode.read_enabled
-        and (ctx.settings.bitable_mode or "").strip().lower() not in ("write", "writeonly", "wo")
+        and ctx_bitable_input_read_enabled(ctx)
     )
     if use_record_fields:
         try:
@@ -1612,6 +1599,15 @@ async def run_workflow(
                         prompt_param=prompt_param,
                         max_items=max_items,
                         strict=strict,
+                    )
+                    related_items = await _resolve_relation_item_files(
+                        ctx,
+                        provider=provider,
+                        comfyui=comfyui_client,
+                        runninghub=runninghub_client,
+                        wf=wf,
+                        items=related_items,
+                        resolve_files=True,
                     )
                     if not related_items:
                         if strict:
@@ -2437,7 +2433,7 @@ async def preview_workflow_runs(
                 break
 
     if not record_id and not row:
-        if bitable and bitable.mode.read_enabled:
+        if bitable and bitable.mode.read_enabled and ctx_bitable_input_read_enabled(ctx):
             record_id = await bitable.find_next_queued_record_id()
 
     if not record_id and bitable:
@@ -2453,7 +2449,7 @@ async def preview_workflow_runs(
         record_id
         and bitable
         and bitable.mode.read_enabled
-        and (ctx.settings.bitable_mode or "").strip().lower() not in ("write", "writeonly", "wo")
+        and ctx_bitable_input_read_enabled(ctx)
     )
     if use_record_fields:
         rec = await bitable.get_record(record_id)
@@ -2558,6 +2554,15 @@ async def preview_workflow_runs(
                     prompt_param=prompt_param,
                     max_items=max_items,
                     strict=strict,
+                )
+                related_items = await _resolve_relation_item_files(
+                    ctx,
+                    provider=provider,
+                    comfyui=comfyui_client,
+                    runninghub=runninghub_client,
+                    wf=wf,
+                    items=related_items,
+                    resolve_files=resolve_files,
                 )
                 if not related_items:
                     if strict:
@@ -2920,7 +2925,7 @@ async def dispatch(ctx: AppContext, *, name: str, args: dict[str, Any], trigger:
         default_table_key = ctx.default_table_key
         bitable = ctx.bitables.get(default_table_key) if default_table_key else None
         
-        if bitable and bitable.mode.read_enabled:
+        if bitable and bitable.mode.read_enabled and ctx_bitable_input_read_enabled(ctx):
             record_id = await bitable.find_next_queued_record_id()
             if not record_id:
                 await _send_text_by_trigger(im, trigger, "队列为空：未找到 queued 任务")
@@ -2977,7 +2982,7 @@ async def dispatch(ctx: AppContext, *, name: str, args: dict[str, Any], trigger:
         if not record_id and not row:
             bitable = ctx.bitables.get(table_key) if table_key else None
             
-            if bitable and bitable.mode.read_enabled:
+            if bitable and bitable.mode.read_enabled and ctx_bitable_input_read_enabled(ctx):
                 record_id = await bitable.find_next_queued_record_id()
 
         params = _args_without_meta(args)
@@ -3023,7 +3028,7 @@ async def dispatch(ctx: AppContext, *, name: str, args: dict[str, Any], trigger:
         inflight = int(str(args.get("inflight") or "1"))
         
         bitable = ctx.bitables.get(table_key)
-        if bitable is None or not bitable.mode.read_enabled:
+        if bitable is None or not bitable.mode.read_enabled or not ctx_bitable_input_read_enabled(ctx):
             if trigger.chat_id:
                 if (not ctx.bitable_mode.read_enabled) and ctx.bitable_configs and (ctx.settings.bitable_mode or "").strip().lower() not in ("off", "none", "disable", "disabled"):
                     await _send_license_guidance(im, trigger)

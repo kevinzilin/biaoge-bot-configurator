@@ -10,6 +10,67 @@ class BitableMode:
     write_enabled: bool
 
 
+_OFF_MODE_NAMES = {"off", "none", "disable", "disabled"}
+_READ_MODE_NAMES = {"read", "readonly", "ro"}
+_WRITE_MODE_NAMES = {"write", "writeonly", "wo"}
+_READWRITE_MODE_NAMES = {"readwrite", "rw", "all", "on", "enable", "enabled"}
+
+
+def normalize_bitable_mode_name(mode: Any) -> str:
+    raw = str(mode or "").strip().lower()
+    if raw in _OFF_MODE_NAMES:
+        return "off"
+    if raw in _READ_MODE_NAMES:
+        return "read"
+    if raw in _WRITE_MODE_NAMES:
+        return "write"
+    if raw in _READWRITE_MODE_NAMES:
+        return "readwrite"
+    if raw == "auto":
+        return "auto"
+    return "readwrite"
+
+
+def bitable_clients_enabled(mode: BitableMode | None) -> bool:
+    return bool(mode and (mode.read_enabled or mode.write_enabled))
+
+
+def bitable_write_enabled(mode: BitableMode | None) -> bool:
+    return bool(mode and mode.write_enabled)
+
+
+def bitable_input_read_enabled(settings_mode: Any, mode: BitableMode | None) -> bool:
+    """True when record field values may be used as workflow input parameters."""
+
+    if normalize_bitable_mode_name(settings_mode) in ("off", "write"):
+        return False
+    return bool(mode and mode.read_enabled)
+
+
+def bitable_event_enabled(settings_mode: Any, mode: BitableMode | None) -> bool:
+    """True when Bitable change events may trigger workflow execution."""
+
+    return bitable_input_read_enabled(settings_mode, mode)
+
+
+def ctx_bitable_clients_enabled(ctx: Any) -> bool:
+    return bitable_clients_enabled(getattr(ctx, "bitable_mode", None))
+
+
+def ctx_bitable_write_enabled(ctx: Any) -> bool:
+    return bitable_write_enabled(getattr(ctx, "bitable_mode", None))
+
+
+def ctx_bitable_input_read_enabled(ctx: Any) -> bool:
+    settings = getattr(ctx, "settings", None)
+    return bitable_input_read_enabled(getattr(settings, "bitable_mode", ""), getattr(ctx, "bitable_mode", None))
+
+
+def ctx_bitable_event_enabled(ctx: Any) -> bool:
+    settings = getattr(ctx, "settings", None)
+    return bitable_event_enabled(getattr(settings, "bitable_mode", ""), getattr(ctx, "bitable_mode", None))
+
+
 @dataclass(frozen=True)
 class BitableConfig:
     app_token: str

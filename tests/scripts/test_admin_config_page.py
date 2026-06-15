@@ -19,6 +19,7 @@ from biaoge_bot.admin_config import (
     _visible_env_values,
     register_admin,
 )
+from biaoge_bot.callback_server import _filename_from_url
 from biaoge_bot.main import build_context
 
 
@@ -71,6 +72,10 @@ def test_admin_routes_and_schema() -> None:
     assert schema["BOT_LOG_LEVEL"]["type"] == "select"
     assert schema["CALLBACK_DUMP_ENABLED"]["type"] == "switch"
     assert schema["SAVE_TASK_REQUEST_PARAMS"]["type"] == "switch"
+    assert "FEISHU_SEND_RESULT_TO_CHAT" in _visible_env_values({"BITABLE_MODE": "readwrite"})
+    assert "FEISHU_SEND_RESULT_TO_CHAT" in _visible_env_schema({"BITABLE_MODE": "readwrite"})
+    assert "FEISHU_SEND_RESULT_TO_CHAT" not in _visible_env_values({"BITABLE_MODE": "off"})
+    assert "FEISHU_SEND_RESULT_TO_CHAT" not in _visible_env_schema({"BITABLE_MODE": "off"})
 
 
 def test_env_normalization() -> None:
@@ -88,6 +93,11 @@ def test_env_normalization() -> None:
         raise AssertionError("invalid BOT_LOG_LEVEL should fail")
 
 
+def test_comfyui_view_url_filename() -> None:
+    url = "http://127.0.0.1:8188/view?filename=ComfyUI_00028_.png&type=output"
+    assert _filename_from_url(url) == "ComfyUI_00028_.png"
+
+
 def test_compile_and_context_entrypoint() -> None:
     import py_compile
 
@@ -103,6 +113,7 @@ def run_all() -> None:
     test_admin_static_assets()
     test_admin_routes_and_schema()
     test_env_normalization()
+    test_comfyui_view_url_filename()
     test_compile_and_context_entrypoint()
     print("Admin config page tests passed!")
 
