@@ -35,6 +35,9 @@ scripts/*
 !scripts/enable_autostart.ps1
 !scripts/enable_autostart_macos.sh
 !scripts/enable_autostart_linux.sh
+!scripts/disable_autostart.ps1
+!scripts/disable_autostart_macos.sh
+!scripts/disable_autostart_linux.sh
 python_3.12_代码加密/
 未加密源码/
 biaoge_bot/*.pyd
