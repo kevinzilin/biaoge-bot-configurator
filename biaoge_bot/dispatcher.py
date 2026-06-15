@@ -7,6 +7,7 @@ import os
 import re
 import logging
 import platform
+import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -926,6 +927,8 @@ async def _upload_local_file_for_provider(
     file_path: str,
     overwrite: bool,
     subfolder: str | None,
+    comfyui_upload_enabled: bool = True,
+    comfyui_input_dir: str | None = None,
 ) -> str:
     p = str(file_path or "").strip()
     if not p:
@@ -949,6 +952,29 @@ async def _upload_local_file_for_provider(
         if not fv:
             raise RuntimeError("runninghub upload ok but missing fileName")
         return fv
+
+    if not comfyui_upload_enabled:
+        input_dir = str(comfyui_input_dir or "").strip()
+        if input_dir:
+            input_root = Path(input_dir)
+            input_root.mkdir(parents=True, exist_ok=True)
+            src = Path(p).resolve()
+            try:
+                return src.relative_to(input_root.resolve()).as_posix()
+            except ValueError:
+                dest = input_root / src.name
+                if dest.exists() and not overwrite:
+                    stem = dest.stem
+                    suffix = dest.suffix
+                    for i in range(1, 1000):
+                        candidate = input_root / f"{stem}_{i}{suffix}"
+                        if not candidate.exists():
+                            dest = candidate
+                            break
+                if src.resolve() != dest.resolve():
+                    shutil.copy2(src, dest)
+                return dest.name
+        return p
 
     uploaded = await comfyui.upload_image(
         file_path=p,
@@ -1131,6 +1157,8 @@ async def _resolve_file_refs_in_params(
                         file_path=tmp_path,
                         overwrite=ctx.settings.comfyui_upload_overwrite,
                         subfolder=ctx.settings.comfyui_upload_subfolder,
+                        comfyui_upload_enabled=ctx.settings.comfyui_upload_enabled,
+                        comfyui_input_dir=ctx.settings.comfyui_input_dir,
                     )
                 finally:
                     try:
@@ -1147,6 +1175,8 @@ async def _resolve_file_refs_in_params(
                     file_path=p,
                     overwrite=ctx.settings.comfyui_upload_overwrite,
                     subfolder=ctx.settings.comfyui_upload_subfolder,
+                    comfyui_upload_enabled=ctx.settings.comfyui_upload_enabled,
+                    comfyui_input_dir=ctx.settings.comfyui_input_dir,
                 )
             continue
 
@@ -1185,6 +1215,8 @@ async def _resolve_file_refs_in_params(
                             file_path=tmp_path,
                             overwrite=ctx.settings.comfyui_upload_overwrite,
                             subfolder=ctx.settings.comfyui_upload_subfolder,
+                            comfyui_upload_enabled=ctx.settings.comfyui_upload_enabled,
+                            comfyui_input_dir=ctx.settings.comfyui_input_dir,
                         )
                     )
                 finally:
@@ -1204,6 +1236,8 @@ async def _resolve_file_refs_in_params(
                         file_path=p,
                         overwrite=ctx.settings.comfyui_upload_overwrite,
                         subfolder=ctx.settings.comfyui_upload_subfolder,
+                        comfyui_upload_enabled=ctx.settings.comfyui_upload_enabled,
+                        comfyui_input_dir=ctx.settings.comfyui_input_dir,
                     )
                 )
                 changed = True

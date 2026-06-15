@@ -1,12 +1,43 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
+import os
 from pathlib import Path
 from typing import Any
 
 import httpx
 
 from .feishu_auth import FeishuAuth
+
+
+def _env_int(name: str, default: int, *, min_value: int = 1, max_value: int = 10) -> int:
+    raw = str(os.getenv(name, "") or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except Exception:
+        return default
+    return max(min_value, min(max_value, value))
+
+
+_UPLOAD_RATE_LIMIT_RETRIES = _env_int("FEISHU_UPLOAD_RATE_LIMIT_RETRIES", 4, min_value=1, max_value=10)
+_RATE_LIMIT_CODES = {99991400, "99991400", 1254290, "1254290"}
+_RATE_LIMIT_TERMS = (
+    "toomanyrequest",
+    "too many request",
+    "too many requests",
+    "request trigger frequency limit",
+    "rate limit",
+    "frequency limit",
+    "qps",
+    "限流",
+    "频率",
+    "过于频繁",
+    "请求过多",
+)
 
 
 def _guess_mime(path: str) -> str:
@@ -46,6 +77,60 @@ def _raise_http(op: str, r: httpx.Response) -> None:
             data = r.text
         raise RuntimeError(f"{op} failed ({r.status_code}): {data}")
     raise RuntimeError(f"{op} failed ({r.status_code}): {r.text}")
+
+
+def _safe_json(r: httpx.Response) -> dict[str, Any] | None:
+    try:
+        data = r.json()
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _is_rate_limited(r: httpx.Response, payload: dict[str, Any] | None = None) -> bool:
+    if r.status_code == 429:
+        return True
+    payload = payload or _safe_json(r) or {}
+    code = payload.get("code")
+    if code in _RATE_LIMIT_CODES:
+        return True
+    text = " ".join(
+        str(x or "")
+        for x in (
+            payload.get("msg"),
+            payload.get("message"),
+            payload.get("error"),
+            r.text if r.status_code >= 400 else "",
+        )
+    ).lower()
+    return any(term in text for term in _RATE_LIMIT_TERMS)
+
+
+def _retry_wait_seconds(r: httpx.Response, attempt_index: int) -> float:
+    for key in ("retry-after", "x-ogw-ratelimit-reset"):
+        raw = str(r.headers.get(key) or "").strip()
+        if raw:
+            try:
+                wait_s = float(raw)
+                if wait_s > 0:
+                    return min(wait_s, 60.0)
+            except Exception:
+                pass
+    return min(0.8 * (2 ** attempt_index), 8.0)
+
+
+async def _sleep_for_rate_limit(op: str, r: httpx.Response, payload: dict[str, Any] | None, attempt: int, max_attempts: int) -> None:
+    wait_s = _retry_wait_seconds(r, attempt)
+    logging.warning(
+        "%s rate limited, retrying: status=%s attempt=%s/%s wait=%.3fs response=%s",
+        op,
+        r.status_code,
+        attempt + 1,
+        max_attempts,
+        wait_s,
+        payload if payload is not None else (r.text[:1000] if r.text else ""),
+    )
+    await asyncio.sleep(wait_s)
 
 
 class IMClient:
@@ -91,23 +176,30 @@ class IMClient:
         data: dict[str, str] = {"file_type": ft, "file_name": name}
         if duration_ms is not None:
             data["duration"] = str(int(duration_ms))
+        max_attempts = max(1, int(_UPLOAD_RATE_LIMIT_RETRIES))
         async with httpx.AsyncClient(timeout=60) as client:
-            with open(file_path, "rb") as f:
-                r = await client.post(
-                    url,
-                    headers={"Authorization": f"Bearer {token}"},
-                    data=data,
-                    files={"file": (name, f, _guess_mime(file_path))},
-                )
-            if r.status_code >= 400:
-                _raise_http("upload_im_file", r)
-            data1 = r.json()
-            if data1.get("code") not in (0, None):
-                raise RuntimeError(f"upload_im_file failed: {data1}")
-            key = (data1.get("data") or {}).get("file_key")
-            if not isinstance(key, str) or not key:
-                raise RuntimeError(f"upload_im_file missing file_key: {data1}")
-            return key
+            for attempt in range(max_attempts):
+                with open(file_path, "rb") as f:
+                    r = await client.post(
+                        url,
+                        headers={"Authorization": f"Bearer {token}"},
+                        data=data,
+                        files={"file": (name, f, _guess_mime(file_path))},
+                    )
+                data1 = _safe_json(r)
+                if (r.status_code >= 400 or (data1 or {}).get("code") not in (0, None)) and _is_rate_limited(r, data1) and attempt < max_attempts - 1:
+                    await _sleep_for_rate_limit("upload_im_file", r, data1, attempt, max_attempts)
+                    continue
+                if r.status_code >= 400:
+                    _raise_http("upload_im_file", r)
+                data1 = data1 or r.json()
+                if data1.get("code") not in (0, None):
+                    raise RuntimeError(f"upload_im_file failed: {data1}")
+                key = (data1.get("data") or {}).get("file_key")
+                if not isinstance(key, str) or not key:
+                    raise RuntimeError(f"upload_im_file missing file_key: {data1}")
+                return key
+        raise RuntimeError("upload_im_file failed: retry exhausted")
 
     async def download_message_resource(
         self,
@@ -160,23 +252,30 @@ class IMClient:
         token = await self._auth.tenant_token()
         url = "https://open.feishu.cn/open-apis/im/v1/images"
         name = Path(file_path).name
+        max_attempts = max(1, int(_UPLOAD_RATE_LIMIT_RETRIES))
         async with httpx.AsyncClient(timeout=30) as client:
-            with open(file_path, "rb") as f:
-                r = await client.post(
-                    url,
-                    headers={"Authorization": f"Bearer {token}"},
-                    data={"image_type": "message"},
-                    files={"image": (name, f, _guess_mime(file_path))},
-                )
-            if r.status_code >= 400:
-                _raise_http("upload_image_message", r)
-            data = r.json()
-            if data.get("code") not in (0, None):
-                raise RuntimeError(f"upload_image_message failed: {data}")
-            key = (data.get("data") or {}).get("image_key")
-            if not isinstance(key, str) or not key:
-                raise RuntimeError(f"upload_image_message missing image_key: {data}")
-            return key
+            for attempt in range(max_attempts):
+                with open(file_path, "rb") as f:
+                    r = await client.post(
+                        url,
+                        headers={"Authorization": f"Bearer {token}"},
+                        data={"image_type": "message"},
+                        files={"image": (name, f, _guess_mime(file_path))},
+                    )
+                data = _safe_json(r)
+                if (r.status_code >= 400 or (data or {}).get("code") not in (0, None)) and _is_rate_limited(r, data) and attempt < max_attempts - 1:
+                    await _sleep_for_rate_limit("upload_image_message", r, data, attempt, max_attempts)
+                    continue
+                if r.status_code >= 400:
+                    _raise_http("upload_image_message", r)
+                data = data or r.json()
+                if data.get("code") not in (0, None):
+                    raise RuntimeError(f"upload_image_message failed: {data}")
+                key = (data.get("data") or {}).get("image_key")
+                if not isinstance(key, str) or not key:
+                    raise RuntimeError(f"upload_image_message missing image_key: {data}")
+                return key
+        raise RuntimeError("upload_image_message failed: retry exhausted")
 
     async def send_image(self, *, chat_id: str, image_key: str) -> None:
         await self._send_message(receive_id_type="chat_id", receive_id=chat_id, msg_type="image", content={"image_key": image_key})

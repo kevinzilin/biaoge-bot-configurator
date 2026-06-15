@@ -164,3 +164,4 @@ FC 环境变量（最低）：
 
 - `FEISHU_SEND_RESULT_TO_CHAT=0`：保持旧行为，仅无表格/无记录的直跑任务会把结果发回对话框
 - `FEISHU_SEND_RESULT_TO_CHAT=1`：绑定表格并回写时，也同步把生成结果发回触发的飞书对话框
+- `FEISHU_UPLOAD_RATE_LIMIT_RETRIES=4`：飞书附件/图片上传遇到限频时的重试次数（1-10）

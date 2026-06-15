@@ -127,9 +127,10 @@ BOT_LOG_LEVEL=INFO
 CALLBACK_DUMP_ENABLED=0
 SAVE_TASK_REQUEST_PARAMS=0
 FEISHU_SEND_RESULT_TO_CHAT=0
+FEISHU_UPLOAD_RATE_LIMIT_RETRIES=4
 ```
 
-`BOT_LOG_LEVEL` 只控制运行日志级别；`CALLBACK_DUMP_ENABLED=1` 会保存回调 payload 到 `logs/dumps/callbacks`；`SAVE_TASK_REQUEST_PARAMS=1` 会保存任务请求参数到 `logs/dumps/task_requests`。两个 dump 开关建议只在排查问题时临时开启。`FEISHU_SEND_RESULT_TO_CHAT=1` 时，绑定表格并回写的任务也会把生成结果同步发回触发的飞书对话框。
+`BOT_LOG_LEVEL` 只控制运行日志级别；`CALLBACK_DUMP_ENABLED=1` 会保存回调 payload 到 `logs/dumps/callbacks`；`SAVE_TASK_REQUEST_PARAMS=1` 会保存任务请求参数到 `logs/dumps/task_requests`。两个 dump 开关建议只在排查问题时临时开启。`FEISHU_SEND_RESULT_TO_CHAT=1` 时，绑定表格并回写的任务也会把生成结果同步发回触发的飞书对话框。`FEISHU_UPLOAD_RATE_LIMIT_RETRIES` 控制飞书附件/图片上传遇到限频时的重试次数。
 
 ## 指令
 
