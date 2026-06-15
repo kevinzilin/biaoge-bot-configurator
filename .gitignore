@@ -5,6 +5,7 @@ AGENTS.md
 .venv/
 requirements-build.txt
 docs/protected_modules_build.md
+钉钉平台接入方案.md
 .trae/
 .codex/
 __pycache__/
