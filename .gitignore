@@ -42,3 +42,4 @@ biaoge_bot/*.so
 biaoge_bot/modules/
 biaoge_bot/license.lic
 _dingtalk_research/
+/tests/scripts/
