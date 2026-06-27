@@ -19,6 +19,7 @@ from .admin_config import _require_admin, register_admin
 from .comfyui import ComfyUIClient
 from .context import AppContext
 from .im import IMClient
+from .network import should_trust_env_proxy_for_url
 from .modules.bitable_logic import resolve_relation_prompts as _enc_resolve_relation_prompts
 from .modules.bitable_writeback import (
     update_split_progress_and_maybe_finalize as _enc_update_split_progress_and_maybe_finalize,
@@ -493,7 +494,7 @@ async def _download_from_view(ctx: AppContext, *, base_url: str, filename: str, 
     params: dict[str, Any] = {"filename": filename, "type": type_ or "output"}
     if subfolder:
         params["subfolder"] = subfolder
-    async with httpx.AsyncClient(timeout=180) as client:
+    async with httpx.AsyncClient(timeout=180, trust_env=should_trust_env_proxy_for_url(base)) as client:
         content: bytes | None = None
         for i in range(6):
             r = await client.get(f"{base}/view", params=params)
@@ -523,7 +524,7 @@ async def _download_from_url(ctx: AppContext, *, url: str, prompt_id: str | None
     name = _safe_filename(name)
     prefix = _safe_filename(prompt_id or "prompt")
     out_path = str(Path(save_dir) / f"{prefix}_{name}")
-    async with httpx.AsyncClient(timeout=180, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=180, follow_redirects=True, trust_env=should_trust_env_proxy_for_url(u)) as client:
         r = await client.get(u)
         r.raise_for_status()
         Path(out_path).write_bytes(r.content)
