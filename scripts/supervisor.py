@@ -15,6 +15,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from biaoge_bot.logging_setup import append_runtime_log, daily_log_path
+from biaoge_bot.network import configure_local_proxy_bypass
+from biaoge_bot.tls import configure_tls_ca_bundle
 
 LOG_DIR = ROOT / "logs"
 LOCK_PATH = LOG_DIR / "runtime" / "biaoge_bot.supervisor.pid"
@@ -191,6 +193,8 @@ def main() -> int:
     delay = 5
     try:
         while not stopping:
+            configure_local_proxy_bypass()
+            configure_tls_ca_bundle(root=ROOT)
             env = os.environ.copy()
             env.setdefault("BIAOGE_ROOT", str(ROOT))
             env.setdefault("PYTHONUNBUFFERED", "1")

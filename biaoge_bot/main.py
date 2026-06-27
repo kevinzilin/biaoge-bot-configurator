@@ -10,6 +10,12 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .network import configure_local_proxy_bypass
+from .tls import configure_tls_ca_bundle
+
+configure_local_proxy_bypass()
+configure_tls_ca_bundle()
+
 import httpx
 import lark_oapi as lark
 import uvicorn
@@ -412,6 +418,8 @@ def _parse_bitable_mode(mode: str) -> BitableMode:
 
 def build_context(env_file: str | None = None) -> AppContext:
     settings = load_settings(env_file)
+    configure_local_proxy_bypass([settings.comfyui_base_url, settings.callback_host])
+    configure_tls_ca_bundle(root=settings.project_root)
     if settings.workflow_config_path:
         p = Path(settings.workflow_config_path)
         if not p.exists():
@@ -451,7 +459,7 @@ def build_context(env_file: str | None = None) -> AppContext:
         for key, table_cfg in tables.items():
             bitables[key] = BitableClient(auth, table_cfg, bitable_mode)
         drive = DriveClient(auth)
-    comfyui = ComfyUIClient(settings.comfyui_base_url)
+    comfyui = ComfyUIClient(settings.comfyui_base_url, upload_timeout_seconds=settings.comfyui_upload_timeout_seconds)
     workflows = WorkflowRegistry.from_config(cfg)
     runner = QueueRunner()
     default_workflow_key = None

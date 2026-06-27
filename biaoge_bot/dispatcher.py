@@ -746,6 +746,88 @@ def _extract_relation_display_keys(value: Any) -> list[str]:
     return [s2] if s2 else []
 
 
+def _preview_relation_value(value: Any, *, limit: int = 120) -> str:
+    if value is None:
+        return "空"
+    try:
+        text = json.dumps(value, ensure_ascii=False, default=str)
+    except Exception:
+        text = str(value)
+    text = str(text).strip()
+    if len(text) > limit:
+        return text[:limit] + "..."
+    return text or "空"
+
+
+def _format_relation_failure(
+    *,
+    record_id: str | None,
+    relation_index: int,
+    src_field: str | None,
+    src_val: Any,
+    tgt_key: str | None,
+    tgt_app: str | None,
+    tgt_tid: str | None,
+    tgt_match: str | None,
+    item_param_map: dict[str, str] | None = None,
+    prompt_fields: list[str] | None = None,
+    failure_kind: str,
+) -> str:
+    target_desc = tgt_key or (
+        f"app_token={tgt_app or '未配置'}, table_id={tgt_tid or '未配置'}"
+        if (tgt_app or tgt_tid)
+        else "未配置目标表"
+    )
+    detail_parts = [
+        f"第{relation_index}个 relationPrompt",
+        f"sourceField={src_field or '未配置'}",
+        f"sourceValue={_preview_relation_value(src_val)}",
+        f"targetTable={target_desc}",
+        f"targetMatchField={tgt_match or '未配置'}",
+    ]
+    if item_param_map:
+        mapped = [f"{param}<={field}" for param, field in item_param_map.items()]
+        detail_parts.append("itemParamMap=" + "，".join(mapped))
+    if prompt_fields:
+        detail_parts.append("promptFields=" + "，".join(prompt_fields))
+    return (
+        f"relationPrompt {failure_kind}："
+        + "；".join(detail_parts)
+        + f"；record_id={record_id or '未知'}。"
+        + "请检查当前记录的 sourceField 值是否为空/是否指向目标表记录，或其展示文本是否能在目标表 targetMatchField 中找到；"
+        + "如果记录已匹配但参数为空，再检查 itemParamMap/promptFields 里的目标表字段名。"
+    )
+
+
+def _write_task_request_dump(ctx: AppContext, *, prefix: str, payload: dict[str, Any]) -> None:
+    save_dir = str(getattr(getattr(ctx, "settings", None), "task_request_dump_dir", "") or "").strip()
+    if not save_dir:
+        return
+    try:
+        os.makedirs(save_dir, exist_ok=True)
+        ts = int(time.time() * 1000)
+        safe_prefix = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(prefix or "debug"))[:80] or "debug"
+        dump_path = os.path.join(save_dir, f"{safe_prefix}_{ts}.json")
+        with open(dump_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2, default=str)
+        logging.info("Task request debug dump written to %s", dump_path)
+    except Exception:
+        logging.exception("Failed to write task request debug dump")
+
+
+def _format_workflow_preparation_error(exc: Exception) -> str:
+    msg = str(exc).strip() or exc.__class__.__name__
+    passthrough_prefixes = (
+        "relationPrompt ",
+        "关联表附件",
+        "主表附件",
+        "下载飞书附件",
+        "上传图片到 ComfyUI",
+    )
+    if msg.startswith(passthrough_prefixes):
+        return msg
+    return f"工作流准备阶段失败：{msg}"
+
 async def _resolve_relation_prompts(
     ctx: AppContext,
     *,
@@ -813,6 +895,7 @@ async def _resolve_relation_item_files(
     wf: WorkflowSpec,
     items: list[dict[str, Any]],
     resolve_files: bool,
+    debug_context: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     if not resolve_files or not items:
         return items
@@ -829,6 +912,7 @@ async def _resolve_relation_item_files(
                 comfyui=comfyui,
                 runninghub=runninghub,
                 value=raw_val,
+                debug_context={**(debug_context or {}), "param_key": param_key, "relation_record_id": current.get("__relation_record_id")},
             )
             value = downloaded if downloaded else raw_val
             current[param_key] = _normalize_bitable_value_for_param(value, wf, param_key)
@@ -864,6 +948,7 @@ async def _download_attachments(
     comfyui: ComfyUIClient,
     runninghub: RunningHubClient | None,
     value: Any,
+    debug_context: dict[str, Any] | None = None,
 ) -> list[str]:
     items = _extract_attachment_items(value)
     if not items:
@@ -884,6 +969,25 @@ async def _download_attachments(
         except TypeError:
             # 旧版 drive.pyd 不支持 download_url 参数，降级调用
             saved = await ctx.drive.download_media(file_token=str(token), download_dir=download_dir, file_name=str(file_name) if file_name else None)
+        except Exception as exc:
+            ctx0 = dict(debug_context or {})
+            _write_task_request_dump(
+                ctx,
+                prefix="attachment_download_error",
+                payload={
+                    "stage": "attachment_download",
+                    "provider": provider,
+                    "error_type": exc.__class__.__name__,
+                    "error": str(exc),
+                    "file_token": str(token),
+                    "file_name": file_name,
+                    "attachment_url_present": bool(attachment_url),
+                    **ctx0,
+                },
+            )
+            label = str(ctx0.get("source_label") or "附件")
+            param_key = str(ctx0.get("param_key") or "未知参数")
+            raise RuntimeError(f"{label}下载失败：param={param_key}，file_token={token}，file={file_name or '未知'}，原因：{exc}") from exc
         if provider == "runninghub":
             if not runninghub:
                 continue
@@ -897,13 +1001,38 @@ async def _download_attachments(
             except Exception:
                 pass
         elif ctx.settings.comfyui_upload_enabled:
-            uploaded = await comfyui.upload_image(
-                file_path=saved,
-                filename=Path(saved).name,
-                type="input",
-                overwrite=ctx.settings.comfyui_upload_overwrite,
-                subfolder=ctx.settings.comfyui_upload_subfolder,
-            )
+            try:
+                uploaded = await comfyui.upload_image(
+                    file_path=saved,
+                    filename=Path(saved).name,
+                    type="input",
+                    overwrite=ctx.settings.comfyui_upload_overwrite,
+                    subfolder=ctx.settings.comfyui_upload_subfolder,
+                )
+            except Exception as exc:
+                ctx0 = dict(debug_context or {})
+                _write_task_request_dump(
+                    ctx,
+                    prefix="attachment_comfyui_upload_error",
+                    payload={
+                        "stage": "attachment_comfyui_upload",
+                        "provider": provider,
+                        "comfyui_base_url": getattr(comfyui, "_base_url", ""),
+                        "comfyui_upload_timeout_seconds": getattr(comfyui, "_upload_timeout_seconds", None),
+                        "error_type": exc.__class__.__name__,
+                        "error": str(exc),
+                        "file_token": str(token),
+                        "file_name": file_name,
+                        "saved_path": saved,
+                        "attachment_url_present": bool(attachment_url),
+                        **ctx0,
+                    },
+                )
+                label = str(ctx0.get("source_label") or "附件")
+                param_key = str(ctx0.get("param_key") or "未知参数")
+                raise RuntimeError(
+                    f"{label}上传到 ComfyUI 失败：param={param_key}，file_token={token}，file={file_name or Path(saved).name}。{exc}"
+                ) from exc
             name = str(uploaded.get("name") or Path(saved).name)
             sub = str(uploaded.get("subfolder") or "")
             out.append(f"{sub}/{name}" if sub else name)
@@ -1417,7 +1546,7 @@ async def run_workflow(
         override_base = cfg_for_wf.get("comfyuiBaseUrl") or cfg_for_wf.get("comfyui_base_url") or cfg_for_wf.get("comfyui_base")
         if isinstance(override_base, str) and override_base.strip():
             comfyui_base_url = override_base.strip()
-    comfyui_client = ctx.comfyui if comfyui_base_url.rstrip("/") == ctx.settings.comfyui_base_url.rstrip("/") else ComfyUIClient(comfyui_base_url)
+    comfyui_client = ctx.comfyui if comfyui_base_url.rstrip("/") == ctx.settings.comfyui_base_url.rstrip("/") else ComfyUIClient(comfyui_base_url, upload_timeout_seconds=ctx.settings.comfyui_upload_timeout_seconds)
     runninghub_client = RunningHubClient(api_key=str(ctx.settings.runninghub_api_key or "")) if provider == "runninghub" else None
 
     if not record_id and row:
@@ -1572,7 +1701,7 @@ async def run_workflow(
             split_groups = []  # 每个启用 split 的关联表的 items 列表，用于笛卡尔积
             non_split_updates = {}  # 不 split 的关联表的合并更新
             
-            for rp in rp_list:
+            for relation_index, rp in enumerate(rp_list, start=1):
                 if not isinstance(rp, dict):
                     continue
                 src_field = rp.get("sourceField") or rp.get("source_field")
@@ -1642,11 +1771,32 @@ async def run_workflow(
                         wf=wf,
                         items=related_items,
                         resolve_files=True,
+                        debug_context={
+                            "source_label": "关联表附件",
+                            "workflow_key": workflow_key,
+                            "record_id": record_id,
+                            "relation_index": relation_index,
+                            "source_field": src_field,
+                            "target_table_key": tgt_key,
+                            "target_match_field": tgt_match,
+                        },
                     )
                     if not related_items:
                         if strict:
                             raise RuntimeError(
-                                f"relationPrompt 未匹配到任何关联记录：请检查当前执行的记录(record_id={record_id}) 表A的选择值 是否能在表B中找到，以及 itemParamMap 的字段名是否存在。"
+                                _format_relation_failure(
+                                    record_id=record_id,
+                                    relation_index=relation_index,
+                                    src_field=src_field,
+                                    src_val=src_val,
+                                    tgt_key=tgt_key,
+                                    tgt_app=tgt_app,
+                                    tgt_tid=tgt_tid,
+                                    tgt_match=tgt_match,
+                                    item_param_map=item_param_map,
+                                    prompt_fields=prompt_fields if (enable_prompt_fields and prompt_fields) else None,
+                                    failure_kind="未匹配到任何关联记录",
+                                )
                             )
                     else:
                         if enable_split:
@@ -1670,7 +1820,18 @@ async def run_workflow(
                     if not related_prompts:
                         if strict:
                             raise RuntimeError(
-                                f"relationPrompt 未匹配到任何关联提示词：请检查当前执行的记录(record_id={record_id}) 表A的“选择屏数”值是否能在表B的匹配列中找到，以及表B是否存在要拼接的字段。"
+                                _format_relation_failure(
+                                    record_id=record_id,
+                                    relation_index=relation_index,
+                                    src_field=src_field,
+                                    src_val=src_val,
+                                    tgt_key=tgt_key,
+                                    tgt_app=tgt_app,
+                                    tgt_tid=tgt_tid,
+                                    tgt_match=tgt_match,
+                                    prompt_fields=prompt_fields,
+                                    failure_kind="未匹配到任何关联提示词",
+                                )
                             )
                     else:
                         if enable_split:
@@ -1680,7 +1841,13 @@ async def run_workflow(
                         else:
                             non_split_updates[prompt_param] = related_prompts
                 elif src_field and enable_item_param_map and item_param_map and not has_item_targets and strict and not (enable_prompt_fields and prompt_fields):
-                    raise RuntimeError("relationPrompt 配置了 itemParamMap，但工作流 params 里没有对应的参数映射：请先在 params 中新增这些参数并配置 targets，或改用 promptFields 拼接。")
+                    missing_param_keys = [key for key in item_param_map.keys() if key not in wf.params]
+                    raise RuntimeError(
+                        "relationPrompt 配置了 itemParamMap，但工作流 params 里没有对应的参数映射："
+                        f"第{relation_index}个 relationPrompt；sourceField={src_field or '未配置'}；"
+                        f"缺少 params={missing_param_keys or list(item_param_map.keys())}；"
+                        f"itemParamMap={item_param_map}。请先在 params 中新增这些参数并配置 targets，或改用 promptFields 拼接。"
+                    )
             
             # 应用非 split 的更新
             merged.update(non_split_updates)
@@ -1711,8 +1878,8 @@ async def run_workflow(
                     detail=group_sizes,
                 )
         except Exception as e:
-            # 处理关联表失败时，更新状态为失败
-            err_msg = f"处理关联表失败: {str(e)}"
+            # 关联字段解析或附件准备失败时，更新状态为失败
+            err_msg = _format_workflow_preparation_error(e)
             if record_id and not record_id.startswith("mock_rec_") and bitable and table_cfg and bitable.mode.write_enabled:
                 wf_fields0 = cfg_for_wf.get("writeBackFields") if isinstance(cfg_for_wf, dict) else None
                 allow_write_error0 = True if not isinstance(wf_fields0, dict) else ("error" in wf_fields0)
@@ -1741,9 +1908,16 @@ async def run_workflow(
                         comfyui=comfyui_client,
                         runninghub=runninghub_client,
                         value=raw_val,
+                        debug_context={
+                            "source_label": "主表附件",
+                            "workflow_key": workflow_key,
+                            "record_id": record_id,
+                            "param_key": param_key,
+                            "field_name": field_name,
+                        },
                     )
                 except Exception as e:
-                    err_msg = f"下载附件失败(param={param_key}): {e}"
+                    err_msg = _format_workflow_preparation_error(e)
                     logging.exception("download_attachments failed for record=%s param=%s", record_id, param_key)
                     if record_id and not record_id.startswith("mock_rec_") and bitable and table_cfg and bitable.mode.write_enabled:
                         error_field = table_cfg.fields.get("error")
@@ -2442,7 +2616,7 @@ async def preview_workflow_runs(
         override_base = cfg_for_wf.get("comfyuiBaseUrl") or cfg_for_wf.get("comfyui_base_url") or cfg_for_wf.get("comfyui_base")
         if isinstance(override_base, str) and override_base.strip():
             comfyui_base_url = override_base.strip()
-    comfyui_client = ctx.comfyui if comfyui_base_url.rstrip("/") == ctx.settings.comfyui_base_url.rstrip("/") else ComfyUIClient(comfyui_base_url)
+    comfyui_client = ctx.comfyui if comfyui_base_url.rstrip("/") == ctx.settings.comfyui_base_url.rstrip("/") else ComfyUIClient(comfyui_base_url, upload_timeout_seconds=ctx.settings.comfyui_upload_timeout_seconds)
     runninghub_client = RunningHubClient(api_key=str(ctx.settings.runninghub_api_key or "")) if provider == "runninghub" else None
 
     if not record_id and row:
@@ -2527,7 +2701,7 @@ async def preview_workflow_runs(
         split_groups = []  # 每个启用 split 的关联表的 items 列表，用于笛卡尔积
         non_split_updates = {}  # 不 split 的关联表的合并更新
         
-        for rp in rp_list:
+        for relation_index, rp in enumerate(rp_list, start=1):
             if not isinstance(rp, dict):
                 continue
             src_field = rp.get("sourceField") or rp.get("source_field")
@@ -2600,7 +2774,21 @@ async def preview_workflow_runs(
                 )
                 if not related_items:
                     if strict:
-                        raise RuntimeError(f"relationPrompt 未匹配到任何关联记录：请检查当前执行的记录(record_id={record_id}) 表A的选择值 是否能在表B中找到，以及 itemParamMap 的字段名是否存在。")
+                        raise RuntimeError(
+                            _format_relation_failure(
+                                record_id=record_id,
+                                relation_index=relation_index,
+                                src_field=src_field,
+                                src_val=src_val,
+                                tgt_key=tgt_key,
+                                tgt_app=tgt_app,
+                                tgt_tid=tgt_tid,
+                                tgt_match=tgt_match,
+                                item_param_map=item_param_map,
+                                prompt_fields=prompt_fields if (enable_prompt_fields and prompt_fields) else None,
+                                failure_kind="未匹配到任何关联记录",
+                            )
+                        )
                 else:
                     if enable_split:
                         split_groups.append((prompt_param, related_items))
@@ -2623,7 +2811,18 @@ async def preview_workflow_runs(
                 if not related_prompts:
                     if strict:
                         raise RuntimeError(
-                            f"relationPrompt 未匹配到任何关联提示词：请检查当前执行的记录(record_id={record_id}) 表A的关联字段值是否能在表B的匹配列中找到，以及表B是否存在要拼接的字段。"
+                            _format_relation_failure(
+                                record_id=record_id,
+                                relation_index=relation_index,
+                                src_field=src_field,
+                                src_val=src_val,
+                                tgt_key=tgt_key,
+                                tgt_app=tgt_app,
+                                tgt_tid=tgt_tid,
+                                tgt_match=tgt_match,
+                                prompt_fields=prompt_fields,
+                                failure_kind="未匹配到任何关联提示词",
+                            )
                         )
                 else:
                     if enable_split:
@@ -2633,7 +2832,13 @@ async def preview_workflow_runs(
                     else:
                         non_split_updates[prompt_param] = related_prompts
             elif src_field and enable_item_param_map and item_param_map and not has_item_targets and strict and not (enable_prompt_fields and prompt_fields):
-                raise RuntimeError("relationPrompt 配置了 itemParamMap，但工作流 params 里没有对应的参数映射：请先在 params 中新增这些参数并配置 targets，或改用 promptFields 拼接。")
+                missing_param_keys = [key for key in item_param_map.keys() if key not in wf.params]
+                raise RuntimeError(
+                    "relationPrompt 配置了 itemParamMap，但工作流 params 里没有对应的参数映射："
+                    f"第{relation_index}个 relationPrompt；sourceField={src_field or '未配置'}；"
+                    f"缺少 params={missing_param_keys or list(item_param_map.keys())}；"
+                    f"itemParamMap={item_param_map}。请先在 params 中新增这些参数并配置 targets，或改用 promptFields 拼接。"
+                )
         
         # 应用非 split 的更新
         merged.update(non_split_updates)

@@ -3,22 +3,19 @@ setlocal
 cd /d "%~dp0"
 
 set "PYEXE="
-where python >nul 2>&1
-if %errorlevel%==0 set "PYEXE=python"
-
-if not defined PYEXE (
-    where py >nul 2>&1
-    if %errorlevel%==0 set "PYEXE=py"
-)
+call :try_python py -3
+if not defined PYEXE call :try_python py
+if not defined PYEXE call :try_python python
 
 if not defined PYEXE (
     echo.
-    echo Python not found. Please install Python 3.10+ and enable "Add python.exe to PATH".
+    echo Python 3.10+ not found or cannot run.
+    echo Please install Python 3.10+ and enable "Add python.exe to PATH".
     pause
     exit /b 1
 )
 
-"%PYEXE%" "scripts\bootstrap.py"
+%PYEXE% "scripts\bootstrap.py"
 set "ERR=%ERRORLEVEL%"
 if not "%ERR%"=="0" (
     echo.
@@ -26,3 +23,8 @@ if not "%ERR%"=="0" (
 )
 pause
 exit /b %ERR%
+
+:try_python
+%* -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" >nul 2>&1
+if "%ERRORLEVEL%"=="0" set "PYEXE=%*"
+exit /b 0

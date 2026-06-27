@@ -91,6 +91,7 @@ class Settings:
     comfyui_upload_enabled: bool
     comfyui_upload_subfolder: str | None
     comfyui_upload_overwrite: bool
+    comfyui_upload_timeout_seconds: int
     remote_callback_url: str | None
     cb_message_token: str | None
     runninghub_api_key: str | None
@@ -160,6 +161,7 @@ def load_settings(env_path: str | None = None) -> Settings:
         comfyui_upload_enabled=to_bool(os.environ.get("COMFYUI_UPLOAD_ENABLED", "0")),
         comfyui_upload_subfolder=(os.environ.get("COMFYUI_UPLOAD_SUBFOLDER", "").strip() or None),
         comfyui_upload_overwrite=to_bool(os.environ.get("COMFYUI_UPLOAD_OVERWRITE", "true")),
+        comfyui_upload_timeout_seconds=max(3, to_int(os.environ.get("COMFYUI_UPLOAD_TIMEOUT_SECONDS", "20"), 20)),
         remote_callback_url=(os.environ.get("REMOTE_CALLBACK_URL", "").strip() or None),
         cb_message_token=(os.environ.get("CB_MESSAGE_TOKEN", "").strip() or None),
         runninghub_api_key=(os.environ.get("RUNNINGHUB_API_KEY", "").strip() or None),

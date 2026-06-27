@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import secrets
@@ -241,6 +242,45 @@ def check_port_available(host: str, port: int) -> None:
         sock.close()
 
 
+def _collect_socks_proxy_sources(env_map: dict[str, str]) -> list[tuple[str, str]]:
+    proxy_keys = (
+        "ALL_PROXY",
+        "all_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+    )
+    seen: set[tuple[str, str]] = set()
+    out: list[tuple[str, str]] = []
+    for source in (os.environ, env_map):
+        for key in proxy_keys:
+            value = str(source.get(key, "") or "").strip()
+            if not value:
+                continue
+            item = (key, value)
+            if item in seen:
+                continue
+            seen.add(item)
+            if value.lower().startswith(("socks://", "socks4://", "socks4a://", "socks5://", "socks5h://")):
+                out.append(item)
+    return out
+
+
+def check_socks_proxy_dependency(env_map: dict[str, str]) -> None:
+    sources = _collect_socks_proxy_sources(env_map)
+    if not sources:
+        return
+    if importlib.util.find_spec("python_socks") is not None:
+        return
+    key, _value = sources[0]
+    install_cmd = "install.cmd" if os.name == "nt" else "bash install.sh"
+    pip_cmd = ".venv\\Scripts\\python.exe -m pip install \"python-socks[asyncio]>=2.4.4\"" if os.name == "nt" else ".venv/bin/python -m pip install 'python-socks[asyncio]>=2.4.4'"
+    raise SystemExit(
+        f"Detected SOCKS proxy in {key}, but the virtual env is missing python-socks.\n"
+        f"Please run {install_cmd} to refresh dependencies, or run:\n{pip_cmd}"
+    )
+
 def prompt_value(key: str, description: str) -> str | None:
     print("")
     print(f"[{description}]")
@@ -307,6 +347,7 @@ def run_preflight(*, interactive: bool) -> dict[str, object]:
     check_port_available(host, port)
     ensure_required_config(env_map, interactive=interactive)
     env_map = read_dotenv()
+    check_socks_proxy_dependency(env_map)
 
     admin_token = env_map.get("ADMIN_TOKEN", "").strip()
     print("")

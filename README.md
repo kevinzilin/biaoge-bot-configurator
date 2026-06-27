@@ -38,7 +38,7 @@ copy .env.example .env
 
 - `FEISHU_APP_ID` / `FEISHU_APP_SECRET`
 - `BITABLE_MODE=off`
-- `COMFYUI_BASE_URL`（本地或私有云）
+- `COMFYUI_BASE_URL`（本地或私有云；系统开启代理时，本机/局域网 ComfyUI 地址会自动绕过代理）
 
 RunningHub（可选）：
 
@@ -91,6 +91,8 @@ bash install.sh
 ```
 
 安装脚本会调用 `scripts/bootstrap.py`，创建 `.env`、`.venv` 并安装 `requirements.txt`。
+
+不要直接从另一台 Windows 电脑复制 `.venv` 使用；Windows 虚拟环境会记录创建时的 Python 安装路径，换电脑后可能仍指向旧路径。新电脑请先安装 Python 3.10+，再运行 `install.cmd` 或 `win_install.ps1`，安装脚本会在发现 `.venv` 不可用时自动重建。
 
 ### 启动与预检
 
@@ -194,6 +196,8 @@ FEISHU_UPLOAD_RATE_LIMIT_RETRIES=4
 ```
 
 `BOT_LOG_LEVEL` 只控制运行日志级别；`CALLBACK_DUMP_ENABLED=1` 会保存回调 payload 到 `logs/dumps/callbacks`；`SAVE_TASK_REQUEST_PARAMS=1` 会保存任务请求参数到 `logs/dumps/task_requests`。两个 dump 开关建议只在排查问题时临时开启。`FEISHU_SEND_RESULT_TO_CHAT=1` 时，绑定表格并回写的任务也会把生成结果同步发回触发的飞书对话框。`FEISHU_UPLOAD_RATE_LIMIT_RETRIES` 控制飞书附件/图片上传遇到限频时的重试次数。
+
+macOS 如果飞书长连接反复出现 `CERTIFICATE_VERIFY_FAILED` / `self-signed certificate in certificate chain`，先重新运行 `bash install.sh` 确保安装了最新依赖；程序默认会把 Python TLS 证书包切到 `certifi`。如果机器上有代理或安全软件做 HTTPS 证书替换，请把它的根证书导出为 PEM，并在 `.env` 中设置 `BIAOGE_CA_BUNDLE=/path/to/root-ca.pem` 后重启。若日志出现 `connecting through a SOCKS proxy requires python-socks`，说明当前终端启用了 SOCKS 代理但虚拟环境缺少代理依赖，运行 `bash install.sh` 或 `.venv/bin/python -m pip install 'python-socks[asyncio]>=2.4.4'` 后再启动。
 
 ## 指令
 

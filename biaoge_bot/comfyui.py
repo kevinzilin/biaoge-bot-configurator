@@ -10,6 +10,8 @@ from typing import Any
 
 import httpx
 
+from .network import should_trust_env_proxy_for_url
+
 
 def _guess_mime(filename: str) -> str:
     low = filename.lower()
@@ -133,8 +135,10 @@ def _looks_like_retryable_workflow_payload_error(response: httpx.Response) -> bo
 
 
 class ComfyUIClient:
-    def __init__(self, base_url: str) -> None:
+    def __init__(self, base_url: str, *, upload_timeout_seconds: int = 20) -> None:
         self._base_url = base_url.rstrip("/")
+        self._upload_timeout_seconds = max(3, int(upload_timeout_seconds or 20))
+        self._trust_env_proxy = should_trust_env_proxy_for_url(self._base_url)
 
     async def queue_workflow(
         self,
@@ -186,7 +190,7 @@ class ComfyUIClient:
         last: httpx.Response | None = None
         last_payload: dict[str, Any] | None = None
         attempts: list[dict[str, Any]] = []
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=30, trust_env=self._trust_env_proxy) as client:
             for idx, (variant_name, payload) in enumerate(payloads):
                 r = await client.post(f"{self._base_url}/prompt_workflow", json=payload)
                 last = r
@@ -255,12 +259,19 @@ class ComfyUIClient:
         if subfolder:
             data["subfolder"] = subfolder
 
-        async with httpx.AsyncClient(timeout=60) as client:
-            with open(file_path, "rb") as f:
-                files = {"image": (name, f, _guess_mime(name))}
-                r = await client.post(f"{self._base_url}/upload/image", data=data, files=files)
-                r.raise_for_status()
-                return r.json()
+        timeout = float(self._upload_timeout_seconds)
+        try:
+            async with httpx.AsyncClient(timeout=timeout, trust_env=self._trust_env_proxy) as client:
+                with open(file_path, "rb") as f:
+                    files = {"image": (name, f, _guess_mime(name))}
+                    r = await client.post(f"{self._base_url}/upload/image", data=data, files=files)
+                    r.raise_for_status()
+                    return r.json()
+        except httpx.TimeoutException as exc:
+            raise RuntimeError(
+                f"上传图片到 ComfyUI 超时：url={self._base_url}/upload/image，file={name}，timeout={timeout:g}s。"
+                "请检查 ComfyUI 是否卡住/不可写 input 目录，或关闭 COMFYUI_UPLOAD_ENABLED 改走本地输入目录。"
+            ) from exc
 
     async def queue_api_prompt(
         self,
@@ -275,7 +286,7 @@ class ComfyUIClient:
         return await self.queue_prompt(payload)
 
     async def queue_prompt(self, prompt_payload: dict[str, Any]) -> ComfyQueued:
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=30, trust_env=self._trust_env_proxy) as client:
             r = await client.post(
                 f"{self._base_url}/prompt",
                 content=json.dumps(prompt_payload, ensure_ascii=False).encode("utf-8"),
@@ -288,18 +299,18 @@ class ComfyUIClient:
             return ComfyQueued(prompt_id=data.get("prompt_id"), raw=data)
 
     async def get_queue(self) -> dict[str, Any]:
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=10, trust_env=self._trust_env_proxy) as client:
             r = await client.get(f"{self._base_url}/queue")
             r.raise_for_status()
             return r.json()
 
     async def interrupt(self) -> None:
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=10, trust_env=self._trust_env_proxy) as client:
             r = await client.post(f"{self._base_url}/interrupt")
             r.raise_for_status()
 
     async def get_history(self, *, prompt_id: str) -> dict[str, Any]:
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=30, trust_env=self._trust_env_proxy) as client:
             r = await client.get(f"{self._base_url}/history/{prompt_id}")
             r.raise_for_status()
             data = r.json()

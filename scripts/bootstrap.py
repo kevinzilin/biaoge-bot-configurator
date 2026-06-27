@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -40,6 +41,43 @@ def run(cmd: list[str]) -> None:
     subprocess.run(cmd, cwd=str(ROOT), check=True)
 
 
+def is_venv_usable(py: Path) -> bool:
+    try:
+        subprocess.run(
+            [str(py), "-c", "import sys; print(sys.executable)"],
+            cwd=str(ROOT),
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True
+    except (OSError, subprocess.CalledProcessError):
+        return False
+
+
+def remove_venv_dir(venv_dir: Path) -> None:
+    root = ROOT.resolve()
+    target = venv_dir.resolve()
+    if target.parent != root or target.name != ".venv":
+        raise RuntimeError(f"Refusing to remove unexpected virtual env path: {target}")
+    shutil.rmtree(target)
+
+
+def ensure_venv() -> Path:
+    venv_dir = ROOT / ".venv"
+    py = venv_python()
+
+    if py.exists() and is_venv_usable(py):
+        return py
+
+    if venv_dir.exists():
+        print("Existing virtual env [.venv] is not usable on this machine; recreating it ...")
+        remove_venv_dir(venv_dir)
+
+    print("Creating virtual env [.venv] ...")
+    run([sys.executable, "-m", "venv", str(venv_dir)])
+    return py
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Install biaoge bot dependencies for the current platform.")
     parser.add_argument("--skip-pip", action="store_true", help="Create files/venv only; do not install Python packages.")
@@ -48,10 +86,7 @@ def main() -> int:
     ensure_python_version()
     ensure_env_file()
 
-    py = venv_python()
-    if not py.exists():
-        print("Creating virtual env [.venv] ...")
-        run([sys.executable, "-m", "venv", str(ROOT / ".venv")])
+    py = ensure_venv()
 
     if not args.skip_pip:
         print("Installing dependencies ...")

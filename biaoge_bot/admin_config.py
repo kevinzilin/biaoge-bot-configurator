@@ -89,6 +89,20 @@ _ENV_SCHEMA: dict[str, dict[str, Any]] = {
         "default": "0",
         "description": "绑定表格的任务完成后，是否也把生成结果发送回触发的飞书对话框。",
     },
+    "FEISHU_UPLOAD_RATE_LIMIT_RETRIES": {
+        "group": "基础服务",
+        "order": 57,
+        "type": "text",
+        "default": "4",
+        "description": "飞书附件/图片上传遇到限频时的重试次数，取值 1-10；默认 4。",
+    },
+    "BIAOGE_CA_BUNDLE": {
+        "group": "基础服务",
+        "order": 58,
+        "type": "text",
+        "default": "",
+        "description": "TLS 证书包路径。通常留空自动使用 certifi；若 macOS 飞书长连接报 CERTIFICATE_VERIFY_FAILED，且网络代理/安全软件使用自签根证书，可填包含该根证书的 PEM 文件。",
+    },
     "COMFYUI_BASE_URL": {
         "group": "ComfyUI",
         "order": 60,
@@ -103,12 +117,26 @@ _ENV_SCHEMA: dict[str, dict[str, Any]] = {
         "default": "",
         "description": "ComfyUI 输入目录。留空表示不指定。",
     },
+    "TEMP_DOWNLOAD_DIR": {
+        "group": "ComfyUI",
+        "order": 75,
+        "type": "text",
+        "default": "temp_downloads",
+        "description": "表格附件下载的临时目录。支持相对路径、绝对路径、~ 和环境变量占位符；相对路径基于项目根目录。",
+    },
     "COMFYUI_UPLOAD_ENABLED": {
         "group": "ComfyUI",
         "order": 80,
         "type": "switch",
         "default": "0",
         "description": "是否允许通过 ComfyUI /upload/image 上传图片。",
+    },
+    "COMFYUI_UPLOAD_TIMEOUT_SECONDS": {
+        "group": "ComfyUI",
+        "order": 85,
+        "type": "text",
+        "default": "20",
+        "description": "上传图片到 ComfyUI /upload/image 的超时时间（秒）。本地服务正常应很快返回；超时通常表示 ComfyUI 卡住、input 目录不可写，或需要关闭 COMFYUI_UPLOAD_ENABLED 改走本地输入目录。",
     },
     "COMFYUI_UPLOAD_SUBFOLDER": {
         "group": "ComfyUI",
@@ -137,6 +165,13 @@ _ENV_SCHEMA: dict[str, dict[str, Any]] = {
         "type": "text",
         "default": "",
         "description": "公网/远程回调地址。适用于外部服务可回调到指定地址的情况。",
+    },
+    "FEISHU_AT_USER_ID": {
+        "group": "远程回调",
+        "order": 125,
+        "type": "text",
+        "default": "",
+        "description": "本地机器人的 bot_open_id，用于 FC 转发器发送 /cb 消息时 @ 本机器人。可在飞书里发送 /botid 获取；轮询模式可留空。",
     },
     "REMOTE_RESULT_MODE": {
         "group": "远程回调",

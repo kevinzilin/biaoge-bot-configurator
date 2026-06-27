@@ -4,15 +4,20 @@ const ENV_DESC = {
   "CALLBACK_DUMP_ENABLED": "是否保存回调 payload 调试 dump（1/0）。开启后统一写入 logs/dumps/callbacks。",
   "SAVE_TASK_REQUEST_PARAMS": "是否保存任务请求参数调试 dump（1/0）。开启后统一写入 logs/dumps/task_requests。",
   "FEISHU_SEND_RESULT_TO_CHAT": "绑定表格的任务完成后，是否也把生成结果发送回触发的飞书对话框（1/0）。",
+  "FEISHU_UPLOAD_RATE_LIMIT_RETRIES": "飞书附件/图片上传遇到限频时的重试次数，取值 1-10；默认 4。",
+  "BIAOGE_CA_BUNDLE": "TLS 证书包路径。通常留空自动使用 certifi；若 macOS 飞书长连接报 CERTIFICATE_VERIFY_FAILED，且网络代理/安全软件使用自签根证书，可填包含该根证书的 PEM 文件。",
   "CALLBACK_HOST": "本机/局域网可访问的监听地址。示例：127.0.0.1（仅本机）或 192.168.x.x（局域网可访问）。",
   "CALLBACK_PORT": "回调服务端口，配置页也是通过该端口访问。",
   "COMFYUI_BASE_URL": "ComfyUI 服务地址（示例：http://127.0.0.1:8188 或远程地址）。",
   "COMFYUI_INPUT_DIR": "ComfyUI 输入目录（可选）。留空表示不指定。",
+  "TEMP_DOWNLOAD_DIR": "表格附件下载的临时目录。支持相对路径、绝对路径、~ 和环境变量占位符；相对路径基于项目根目录。",
   "COMFYUI_UPLOAD_ENABLED": "是否允许上传图片到 ComfyUI（1/0）。",
+  "COMFYUI_UPLOAD_TIMEOUT_SECONDS": "上传图片到 ComfyUI /upload/image 的超时时间（秒），默认 20。本地服务正常应很快返回；超时通常表示 ComfyUI 卡住、input 目录不可写，或需要关闭 COMFYUI_UPLOAD_ENABLED 改走本地输入目录。",
   "COMFYUI_UPLOAD_SUBFOLDER": "上传到 ComfyUI 的子目录（可选）。",
   "COMFYUI_UPLOAD_OVERWRITE": "上传同名文件时是否覆盖（true/false）。",
   "RESULT_OUTPUT_DIR": "结果输出目录（可选）。填绝对/相对路径时保存生成结果，不填则只做临时中转不落盘。示例：output 或 ${BIAOGE_ROOT}/output（推荐统一用正斜杠 /）。",
   "REMOTE_CALLBACK_URL": "公网/远程回调地址（可选）。适用于外部服务能回调到你指定的地址的情况。",
+  "FEISHU_AT_USER_ID": "本地机器人的 bot_open_id，用于 FC 转发器发送 /cb 消息时 @ 本机器人。可在飞书里发送 /botid 获取；轮询模式可留空。",
   "REMOTE_RESULT_MODE": "远程结果获取模式（例如 poll/fc）。",
   "REMOTE_POLL_INTERVAL_SECONDS": "远程轮询间隔（秒），过小可能导致请求过频。",
   "REMOTE_POLL_FALLBACK_SECONDS": "远程轮询兜底超时（秒），超过将走兜底策略。",
@@ -26,7 +31,7 @@ const STATE = {
   selected: {type: "env", key: ""},
 };
 const PARAM_TYPE_OPTIONS = ["str", "int", "float", "bool"];
-const TABLE_FIELD_KEY_OPTIONS = ["status", "output", "error", "prompt_id", "created_time", "task_name"];
+const TABLE_FIELD_KEY_OPTIONS = ["status", "output", "output_image", "output_video", "output_audio", "output_text", "error", "prompt_id", "created_time", "task_name"];
 const STATUS_VALUE_KEY_OPTIONS = ["queued", "trigger", "running", "done", "partial", "failed"];
 let CURRENT = null;
 
@@ -990,7 +995,7 @@ function renderEditor() {
         ]),
         el("div", {class:"form"}, [
           fields,
-          el("div", {class:"help", text:"字段映射：key 为系统字段名，value 为多维表格列名。KEY 支持下拉选择，也可手填。全部系统字段：status（任务状态）、output（生成结果）、error（错误信息）、prompt_id（任务ID）、created_time（创建时间）、task_name（标题/任务名称，用于结果文件夹命名）。"}),
+          el("div", {class:"help", text:"字段映射：key 为系统字段名，value 为多维表格列名。KEY 支持下拉选择，也可手填。结果列：output 是通用结果列；运行记录表（runLogTable）可用 output_image/output_video/output_audio/output_text 按类型分流，只填 output 时写同一列，只填某个 output_* 时只写对应类型，output 和任意 output_* 同时填写时分流列优先生效，output 只在四个 output_* 都未配置时兜底。主任务表如需分流，请在 workflow.writeBackFields 的 output 写 {\"image\":\"图片结果\",\"text\":\"文本结果\"}。其它系统字段：status（任务状态）、error（错误信息）、prompt_id（任务ID）、created_time（创建时间）、task_name（标题/任务名称，用于结果文件夹命名）。"}),
         ]),
       ]),
       el("div", {class:"block"}, [
@@ -1303,7 +1308,7 @@ function renderEditor() {
         ]),
         el("div", {class:"form"}, [
           writeBackFields,
-          el("div", {class:"help", text:"例：output -> 结果图（或 output -> {\"image\":\"图片结果\",\"text\":\"文本结果\"} 按类型分流；image/video/audio/text 可选）。prompt_id -> 任务ID；status -> 任务状态。"}),
+          el("div", {class:"help", text:"例：output -> 结果图，会把所有产出写入同一列；或 output -> {\"image\":\"图片结果\",\"text\":\"文本结果\"} 按类型分流。workflow 里的 writeBackFields 会覆盖表 fields；当 output 使用对象分流时，只写对象里配置的类型列，普通 output 兜底列不再生效。prompt_id -> 任务ID；status -> 任务状态。"}),
         ]),
       ]),
       el("div", {class:"block bitableOnly workflowTableOnly"}, [

@@ -1829,7 +1829,7 @@ async def handle_callback_payload(ctx: AppContext, payload: Any) -> dict[str, An
     provider = str(provider).strip().lower() if isinstance(provider, str) else ""
     if provider not in ("runninghub",) and prompt_id and (not isinstance(payload.get("result"), dict) or not _iter_output_items(payload, output_node_ids=output_node_ids)):
         base = _strip_ticks(str(cb_ctx.get("comfyui_base_url") or "")).strip() or ctx.settings.comfyui_base_url
-        cli = ctx.comfyui if base.rstrip("/") == ctx.settings.comfyui_base_url.rstrip("/") else ComfyUIClient(base)
+        cli = ctx.comfyui if base.rstrip("/") == ctx.settings.comfyui_base_url.rstrip("/") else ComfyUIClient(base, upload_timeout_seconds=ctx.settings.comfyui_upload_timeout_seconds)
         try:
             item = await cli.get_history_item(prompt_id=prompt_id)
         except Exception:
