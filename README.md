@@ -197,7 +197,7 @@ FEISHU_UPLOAD_RATE_LIMIT_RETRIES=4
 
 `BOT_LOG_LEVEL` 只控制运行日志级别；`CALLBACK_DUMP_ENABLED=1` 会保存回调 payload 到 `logs/dumps/callbacks`；`SAVE_TASK_REQUEST_PARAMS=1` 会保存任务请求参数到 `logs/dumps/task_requests`。两个 dump 开关建议只在排查问题时临时开启。`FEISHU_SEND_RESULT_TO_CHAT=1` 时，绑定表格并回写的任务也会把生成结果同步发回触发的飞书对话框。`FEISHU_UPLOAD_RATE_LIMIT_RETRIES` 控制飞书附件/图片上传遇到限频时的重试次数。
 
-macOS 如果飞书长连接反复出现 `CERTIFICATE_VERIFY_FAILED` / `self-signed certificate in certificate chain`，先重新运行 `bash install.sh` 确保安装了最新依赖；程序默认会把 Python TLS 证书包切到 `certifi`。如果机器上有代理或安全软件做 HTTPS 证书替换，请把它的根证书导出为 PEM，并在 `.env` 中设置 `BIAOGE_CA_BUNDLE=/path/to/root-ca.pem` 后重启。若日志出现 `connecting through a SOCKS proxy requires python-socks`，说明当前终端启用了 SOCKS 代理但虚拟环境缺少代理依赖，运行 `bash install.sh` 或 `.venv/bin/python -m pip install 'python-socks[asyncio]>=2.4.4'` 后再启动。
+macOS 如果飞书长连接反复出现 `CERTIFICATE_VERIFY_FAILED` / `self-signed certificate in certificate chain`，先重新运行 `bash install.sh` 确保安装了最新依赖；程序默认会把 Python TLS 证书包切到 `certifi`。如果机器上有代理或安全软件做 HTTPS 证书替换，请把它的根证书导出为 PEM，并在 `.env` 中设置 `BIAOGE_CA_BUNDLE=/path/to/root-ca.pem` 后重启。若日志出现 `connecting through a SOCKS proxy requires python-socks`，说明当前终端启用了 SOCKS 代理但虚拟环境缺少代理依赖，运行 `bash install.sh` 或 `.venv/bin/python -m pip install 'python-socks[asyncio]>=2.4.4'` 后再启动。若日志里是 `Unable to connect to proxy` / `127.0.0.1:<端口> Connection refused`，通常是终端残留了本地代理环境变量但代理软件未启动；新版启动时会自动移除当前进程里不可连接的本地代理变量。
 
 ## 指令
 

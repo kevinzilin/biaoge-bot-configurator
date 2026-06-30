@@ -10,9 +10,10 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .network import configure_local_proxy_bypass
+from .network import clear_unavailable_local_proxy_env, configure_local_proxy_bypass
 from .tls import configure_tls_ca_bundle
 
+clear_unavailable_local_proxy_env()
 configure_local_proxy_bypass()
 configure_tls_ca_bundle()
 
@@ -488,6 +489,7 @@ def _parse_bitable_mode(mode: str) -> BitableMode:
 
 def build_context(env_file: str | None = None) -> AppContext:
     settings = load_settings(env_file)
+    clear_unavailable_local_proxy_env()
     configure_local_proxy_bypass([settings.comfyui_base_url, settings.callback_host])
     configure_tls_ca_bundle(root=settings.project_root)
     if settings.workflow_config_path:

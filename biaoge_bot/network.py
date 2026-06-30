@@ -2,8 +2,19 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import socket
 from urllib.parse import urlparse
 from typing import Iterable, MutableMapping
+
+
+_PROXY_ENV_KEYS = (
+    "ALL_PROXY",
+    "all_proxy",
+    "HTTPS_PROXY",
+    "https_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+)
 
 
 _LOCAL_PROXY_BYPASS_DEFAULTS = (
@@ -45,6 +56,63 @@ def is_local_or_private_host(value: str) -> bool:
 def should_trust_env_proxy_for_url(url: str) -> bool:
     return not is_local_or_private_host(url)
 
+
+
+def _is_loopback_host(value: str) -> bool:
+    host = _host_from_url_or_host(value).lower()
+    if host in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}:
+        return True
+    try:
+        return bool(ipaddress.ip_address(host).is_loopback)
+    except ValueError:
+        return False
+
+
+def _proxy_endpoint(value: str) -> tuple[str, int] | None:
+    raw = str(value or "").strip().strip('"').strip("'")
+    if not raw:
+        return None
+    if "://" not in raw:
+        raw = "http://" + raw
+    try:
+        parsed = urlparse(raw)
+        host = (parsed.hostname or "").strip().strip("[]")
+        port = parsed.port
+    except ValueError:
+        return None
+    if not host or port is None:
+        return None
+    return host, int(port)
+
+
+def _tcp_port_open(host: str, port: int, *, timeout: float) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def clear_unavailable_local_proxy_env(
+    *,
+    environ: MutableMapping[str, str] | None = None,
+    timeout: float = 0.2,
+) -> list[tuple[str, str]]:
+    env = environ if environ is not None else os.environ
+    removed: list[tuple[str, str]] = []
+    for key in _PROXY_ENV_KEYS:
+        value = env.get(key)
+        endpoint = _proxy_endpoint(value or "")
+        if endpoint is None:
+            continue
+        host, port = endpoint
+        if not _is_loopback_host(host):
+            continue
+        if _tcp_port_open(host, port, timeout=timeout):
+            continue
+        removed.append((key, value or ""))
+        env.pop(key, None)
+    return removed
 
 def _split_no_proxy(value: str) -> list[str]:
     out: list[str] = []
