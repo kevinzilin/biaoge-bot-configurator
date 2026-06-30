@@ -50,6 +50,9 @@ from .workflows import WorkflowRegistry
 _BOT_OPEN_ID: str | None = None
 _BOT_OPEN_ID_LOCK = threading.Lock()
 _WS_EVENT_DUMP_LIMIT = 8000
+_WS_LAST_EVENT_AT = 0.0
+_WS_LAST_EVENT_TYPE = ""
+_WS_LAST_EVENT_LOCK = threading.Lock()
 
 
 class _DebugWsEventHandler:
@@ -76,6 +79,13 @@ class _DebugWsEventHandler:
                 event_type = str(header.get("event_type") or header.get("eventType") or obj.get("event_type") or obj.get("eventType") or event.get("type") or obj.get("type") or "").strip()
         except Exception:
             obj = None
+        try:
+            global _WS_LAST_EVENT_AT, _WS_LAST_EVENT_TYPE
+            with _WS_LAST_EVENT_LOCK:
+                _WS_LAST_EVENT_AT = time.time()
+                _WS_LAST_EVENT_TYPE = event_type or "unknown"
+        except Exception:
+            pass
         try:
             if event_type:
                 logging.info("ws_event (schema=%s event_type=%s)", schema or "", event_type)
@@ -121,7 +131,11 @@ def _warm_bitable_event_subscriptions(ctx: AppContext) -> None:
         if not ftokens:
             return
         try:
-            results = await subscribe_bitable_files(auth=ctx.auth, file_tokens=ftokens)
+            results = await subscribe_bitable_files(
+                auth=ctx.auth,
+                file_tokens=ftokens,
+                timeout_seconds=int(getattr(ctx.settings, "bitable_http_timeout_seconds", 10) or 10),
+            )
         except Exception as e:
             try:
                 logging.info("bitable_event_subscribe skipped: %s", str(e))
@@ -147,6 +161,60 @@ def _warm_bitable_event_subscriptions(ctx: AppContext) -> None:
     except Exception:
         pass
 
+
+def _periodic_bitable_event_subscriptions(ctx: AppContext) -> None:
+    while True:
+        try:
+            interval = max(300, int(os.environ.get("BITABLE_EVENT_RESUBSCRIBE_SECONDS", "1800") or "1800"))
+        except Exception:
+            interval = 1800
+        time.sleep(interval)
+        try:
+            logging.info("bitable_event_subscribe periodic refresh starting (interval=%ss)", interval)
+            _warm_bitable_event_subscriptions(ctx)
+        except Exception:
+            logging.exception("bitable_event_subscribe periodic refresh failed")
+
+
+def _ws_event_watchdog(ctx: AppContext | None = None) -> None:
+    last_resubscribe_at = 0.0
+    while True:
+        try:
+            interval = max(60, int(os.environ.get("FEISHU_WS_WATCHDOG_LOG_SECONDS", "60") or "60"))
+        except Exception:
+            interval = 60
+        time.sleep(interval)
+        try:
+            restart_after = max(0, int(os.environ.get("FEISHU_WS_RESTART_IF_IDLE_SECONDS", "0") or "0"))
+        except Exception:
+            restart_after = 0
+        try:
+            resubscribe_after = max(60, int(os.environ.get("FEISHU_WS_IDLE_RESUBSCRIBE_SECONDS", "60") or "60"))
+        except Exception:
+            resubscribe_after = 60
+        with _WS_LAST_EVENT_LOCK:
+            last_at = float(_WS_LAST_EVENT_AT or 0.0)
+            last_type = str(_WS_LAST_EVENT_TYPE or "")
+        now = time.time()
+        idle = int(now - last_at) if last_at > 0 else -1
+        logging.info(
+            "feishu ws watchdog: last_event_age=%ss last_event_type=%s restart_if_idle=%ss idle_resubscribe=%ss",
+            idle if idle >= 0 else "never",
+            last_type or "never",
+            restart_after,
+            resubscribe_after,
+        )
+        if ctx is not None and ctx_bitable_event_enabled(ctx) and (last_at <= 0 or now - last_at > resubscribe_after):
+            if now - last_resubscribe_at >= resubscribe_after:
+                last_resubscribe_at = now
+                try:
+                    logging.info("feishu ws watchdog: refreshing bitable subscriptions after idle=%ss", idle if idle >= 0 else "never")
+                    _warm_bitable_event_subscriptions(ctx)
+                except Exception:
+                    logging.exception("feishu ws watchdog: idle subscription refresh failed")
+        if restart_after > 0 and (last_at <= 0 or now - last_at > restart_after):
+            logging.error("feishu ws watchdog exiting process for supervisor restart: idle=%ss threshold=%ss", idle, restart_after)
+            os._exit(75)
 
 async def _fetch_bot_open_id(ctx: AppContext) -> str | None:
     token = ""
@@ -372,6 +440,7 @@ def _parse_tables(settings: Any, cfg: dict[str, Any]) -> tuple[dict[str, Bitable
                 view_id=view_id,
                 fields=dict(fields),
                 status_values=dict(status_values),
+                http_timeout_seconds=int(getattr(settings, "bitable_http_timeout_seconds", 10) or 10),
             )
         dk = cfg.get("default_table")
         if isinstance(dk, str) and dk in tables:
@@ -394,6 +463,7 @@ def _parse_tables(settings: Any, cfg: dict[str, Any]) -> tuple[dict[str, Bitable
                 view_id=view_id,
                 fields=dict(fields),
                 status_values=dict(status_values),
+                http_timeout_seconds=int(getattr(settings, "bitable_http_timeout_seconds", 10) or 10),
             )
             default_key = "default"
 
@@ -791,6 +861,7 @@ def do_bot_menu_event_factory(ctx: AppContext):
 
 _BITABLE_TRIGGER_LOCK = threading.Lock()
 _BITABLE_TRIGGER_SEEN: dict[str, float] = {}
+_BITABLE_TRIGGER_DELAYED_RECHECK: dict[str, float] = {}
 
 
 def do_bitable_record_changed_event_factory(ctx: AppContext):
@@ -835,10 +906,11 @@ def do_bitable_record_changed_event_factory(ctx: AppContext):
         table_key = _enc_resolve_table_key(ctx, app_token=app_token, table_id=table_id)
         try:
             logging.info(
-                "bitable_event received (event_type=%s table_key=%s record_id=%s operator_open_id=%s app_token=%s table_id=%s keys=%s)",
+                "bitable_event received (event_type=%s table_key=%s record_id=%s record_ids=%s operator_open_id=%s app_token=%s table_id=%s keys=%s)",
                 event_type,
                 str(table_key or ""),
                 str(record_id or ""),
+                json.dumps(record_ids or [], ensure_ascii=False),
                 str(operator_open_id or ""),
                 str(app_token or ""),
                 str(table_id or ""),
@@ -854,23 +926,65 @@ def do_bitable_record_changed_event_factory(ctx: AppContext):
 
         trig_key = f"{table_key}:{record_id}:{event_type}"
         now = float(time.time())
+        delay_seconds = 0.0
+        delayed_recheck = False
         with _BITABLE_TRIGGER_LOCK:
             last = _BITABLE_TRIGGER_SEEN.get(trig_key)
             if last and now - last < 2.0:
-                return
-            _BITABLE_TRIGGER_SEEN[trig_key] = now
+                if trig_key in _BITABLE_TRIGGER_DELAYED_RECHECK:
+                    return
+                _BITABLE_TRIGGER_DELAYED_RECHECK[trig_key] = now
+                delay_seconds = 2.2
+                delayed_recheck = True
+                try:
+                    logging.info(
+                        "bitable_event debounce: delayed recheck scheduled (event_type=%s table_key=%s record_id=%s delay=%ss)",
+                        event_type,
+                        str(table_key or ""),
+                        str(record_id or ""),
+                        delay_seconds,
+                    )
+                except Exception:
+                    pass
+            else:
+                _BITABLE_TRIGGER_SEEN[trig_key] = now
             if len(_BITABLE_TRIGGER_SEEN) > 2000:
                 for k, t in list(_BITABLE_TRIGGER_SEEN.items()):
                     if now - t > 120.0:
                         _BITABLE_TRIGGER_SEEN.pop(k, None)
+                        _BITABLE_TRIGGER_DELAYED_RECHECK.pop(k, None)
+            for k, t in list(_BITABLE_TRIGGER_DELAYED_RECHECK.items()):
+                if now - t > 120.0:
+                    _BITABLE_TRIGGER_DELAYED_RECHECK.pop(k, None)
 
         def _run() -> None:
             async def _job() -> None:
-                for rid in (record_ids or [])[:20]:
-                    try:
-                        await _enc_try_trigger_record(ctx, table_key=table_key, record_id=rid, operator_open_id=operator_open_id, payload=payload)
-                    except Exception:
-                        continue
+                try:
+                    if delay_seconds > 0:
+                        await asyncio.sleep(delay_seconds)
+                    for rid in (record_ids or [])[:20]:
+                        try:
+                            logging.info(
+                                "bitable_event worker handling record (event_type=%s table_key=%s record_id=%s delayed_recheck=%s)",
+                                event_type,
+                                str(table_key or ""),
+                                str(rid or ""),
+                                bool(delayed_recheck),
+                            )
+                            await _enc_try_trigger_record(ctx, table_key=table_key, record_id=rid, operator_open_id=operator_open_id, payload=payload)
+                        except Exception:
+                            logging.exception(
+                                "bitable_event worker failed (event_type=%s table_key=%s record_id=%s delayed_recheck=%s)",
+                                event_type,
+                                str(table_key or ""),
+                                str(rid or ""),
+                                bool(delayed_recheck),
+                            )
+                            continue
+                finally:
+                    if delayed_recheck:
+                        with _BITABLE_TRIGGER_LOCK:
+                            _BITABLE_TRIGGER_DELAYED_RECHECK.pop(trig_key, None)
 
             asyncio.run(_job())
 
@@ -927,8 +1041,13 @@ def main() -> None:
 
     threading.Thread(target=start_callback_server, args=(ctx,), daemon=True).start()
     threading.Thread(target=_warm_bot_open_id, args=(ctx,), daemon=True).start()
+    threading.Thread(target=_ws_event_watchdog, args=(ctx,), daemon=True).start()
     if ctx_bitable_event_enabled(ctx):
+        logging.info("bitable event handling enabled; starting subscription warmup and periodic refresh")
         threading.Thread(target=_warm_bitable_event_subscriptions, args=(ctx,), daemon=True).start()
+        threading.Thread(target=_periodic_bitable_event_subscriptions, args=(ctx,), daemon=True).start()
+    else:
+        logging.info("bitable event handling disabled by BITABLE_MODE or bitable mode")
 
     def _ignore_event(*_: Any, **__: Any) -> None:
         return

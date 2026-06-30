@@ -1427,8 +1427,8 @@ def _map_fields_by_config(cfg: Any, values: dict[str, Any]) -> dict[str, Any]:
     return _enc_map_fields_by_config(cfg, values)
 
 
-async def _bitable_create_record(*, auth: Any, app_token: str, table_id: str, fields: dict[str, Any]) -> str:
-    return await _enc_bitable_create_record(auth=auth, app_token=app_token, table_id=table_id, fields=fields)
+async def _bitable_create_record(*, auth: Any, app_token: str, table_id: str, fields: dict[str, Any], timeout_seconds: int = 15) -> str:
+    return await _enc_bitable_create_record(auth=auth, app_token=app_token, table_id=table_id, fields=fields, timeout_seconds=timeout_seconds)
 
 
 async def _mark_status(bitable: Any, record_id: str, status_key: str) -> None:
@@ -2217,7 +2217,7 @@ async def run_workflow(
                         }
                         fields = _map_fields_by_config(runlog_cfg, raw_fields)
                         if fields:
-                            run_log_record_id = await _bitable_create_record(auth=ctx.auth, app_token=runlog_cfg.app_token, table_id=runlog_cfg.table_id, fields=fields)
+                            run_log_record_id = await _bitable_create_record(auth=ctx.auth, app_token=runlog_cfg.app_token, table_id=runlog_cfg.table_id, fields=fields, timeout_seconds=int(getattr(runlog_cfg, "http_timeout_seconds", 15) or 15))
                     except Exception:
                         run_log_record_id = None
                 if run_log_table_key and run_log_record_id and isinstance(cb_ctx, dict):
@@ -2547,7 +2547,7 @@ async def run_workflow(
                 }
                 fields = _map_fields_by_config(runlog_cfg, raw_fields)
                 if fields:
-                    await _bitable_create_record(auth=ctx.auth, app_token=runlog_cfg.app_token, table_id=runlog_cfg.table_id, fields=fields)
+                    await _bitable_create_record(auth=ctx.auth, app_token=runlog_cfg.app_token, table_id=runlog_cfg.table_id, fields=fields, timeout_seconds=int(getattr(runlog_cfg, "http_timeout_seconds", 15) or 15))
             except Exception:
                 pass
         raise RuntimeError(err_msg)

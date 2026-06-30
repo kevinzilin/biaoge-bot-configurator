@@ -78,6 +78,7 @@ class BitableConfig:
     view_id: str | None
     fields: dict[str, str]
     status_values: dict[str, str]
+    http_timeout_seconds: int = 10
 
 
 class BitablePort(Protocol):

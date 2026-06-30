@@ -103,6 +103,13 @@ _ENV_SCHEMA: dict[str, dict[str, Any]] = {
         "default": "",
         "description": "TLS 证书包路径。通常留空自动使用 certifi；若 macOS 飞书长连接报 CERTIFICATE_VERIFY_FAILED，且网络代理/安全软件使用自签根证书，可填包含该根证书的 PEM 文件。",
     },
+    "BITABLE_HTTP_TIMEOUT_SECONDS": {
+        "group": "基础服务",
+        "order": 59,
+        "type": "text",
+        "default": "10",
+        "description": "飞书多维表格接口读写超时时间（秒）。默认 10；网络慢或偶发 ReadTimeout 时可调大到 20-30。",
+    },
     "COMFYUI_BASE_URL": {
         "group": "ComfyUI",
         "order": 60,

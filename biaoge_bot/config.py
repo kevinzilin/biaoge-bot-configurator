@@ -84,6 +84,7 @@ class Settings:
     bitable_app_token: str
     bitable_table_id: str
     bitable_mode: str
+    bitable_http_timeout_seconds: int
     comfyui_input_dir: str | None
     temp_download_dir: str
     result_output_dir: str
@@ -154,6 +155,7 @@ def load_settings(env_path: str | None = None) -> Settings:
         bitable_app_token=os.environ.get("BITABLE_APP_TOKEN", "").strip(),
         bitable_table_id=os.environ.get("BITABLE_TABLE_ID", "").strip(),
         bitable_mode=os.environ.get("BITABLE_MODE", "auto").strip().lower(),
+        bitable_http_timeout_seconds=max(3, to_int(os.environ.get("BITABLE_HTTP_TIMEOUT_SECONDS", "10"), 10)),
         comfyui_input_dir=resolve_optional_path(os.environ.get("COMFYUI_INPUT_DIR", ""), root=root),
         temp_download_dir=resolve_project_path(os.environ.get("TEMP_DOWNLOAD_DIR", "temp_downloads"), root=root),
         result_output_dir=resolve_optional_path(os.environ.get("RESULT_OUTPUT_DIR", ""), root=root) or "",
